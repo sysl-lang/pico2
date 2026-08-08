@@ -76,11 +76,17 @@ led_is_on() -> bool = lib.cyw43_arch_gpio_get(led_pin)
 // Whether the board is running on USB power rather than on its own supply.
 on_usb_power() -> bool = lib.cyw43_arch_gpio_get(vbus_pin)
 
-// ## Bytes in and out
+// ## Bytes and characters, in and out
+//
+// **Both exist, and the difference is not pedantry.** A `char` is a Unicode scalar value and may take
+// four bytes on the wire; a byte is a byte. Text wants characters. Echoing a line as it is typed
+// wants bytes, because a byte pulled out of a half-typed line is not a character yet — and C's
+// `getchar`, which answers a *byte* in something named for a character, is exactly the confusion this
+// module is here to undo.
 //
 // **`None` at end of input, where C answers `-1` in the same `int` it uses for the byte.** That is
-// the C-ism this module exists to remove: a caller writing `if c < 0` is writing C, and a caller
-// matching on `None` is writing sysl.
+// the other C-ism worth removing: a caller writing `if c < 0` is writing C, and a caller matching on
+// `None` is writing sysl.
 read_byte() -> Option[u8] =
     val c = lib.stdio_getchar()
 
@@ -97,11 +103,57 @@ write_byte(b: u8) = lib.putchar(int(b))
 // The encoding is `sysl.printc`'s, which ends at the same `putchar` this module declares.
 write_char(c: char) = printc(c)
 
+// One character, decoded from however many bytes it took — the other half of `write_char`, and the
+// one a program reading text wants.
+//
+// **`None` means the input ended**, not that something was wrong with it. Malformed input answers
+// **U+FFFD**, the replacement character, which is what a terminal does and what keeps one bad byte
+// from ending a session. A caller that needs to tell a bad byte from a good one reads bytes.
+//
+// A continuation byte that is missing or out of range ends the character there and answers the
+// replacement, rather than consuming what follows: the next byte is far more likely to start a fresh
+// character than to be the rest of a broken one.
+read_char() -> Option[char] =
+    read_byte() match
+        None -> None
+
+        Some(b0) ->
+            if b0 < 128 then return Some(char(uint(b0)))
+
+            var more = 0
+
+            if b0 & 224 == 192 then more = 1
+            else if b0 & 240 == 224 then more = 2
+            else if b0 & 248 == 240 then more = 3
+
+            // A continuation byte arriving where a leading byte belongs.
+            if more == 0 then return Some(replacement)
+
+            val mask = if more == 1 then 31 else if more == 2 then 15 else 7
+            var cp = uint(b0 & u8(mask))
+            var n = 0
+
+            while n < more
+                read_byte() match
+                    None -> return Some(replacement)
+
+                    Some(b) ->
+                        if b & 192 != 128 then return Some(replacement)
+
+                        cp = (cp << 6) | uint(b & 63)
+                        n += 1
+
+            Some(char(cp))
+end read_char
+
 // ## A line of input
 //
 // **sysl has no `\b` escape** — the set is `\n`, `\t`, `\r`, `\0`, `\\`, `\'`, `\"` and `\u{…}` — so
 // the one control character needed by name here is written as its code point and given one.
 private const bs: char = '\u{8}'
+
+// U+FFFD, what a decoder answers for input it cannot make sense of.
+private const replacement: char = '\u{fffd}'
 
 // Whether the last line ended with a CR, so that the LF of a CRLF is swallowed rather than read as an
 // empty line following it. It has to outlive one `read_line`, because the two bytes of a CRLF
