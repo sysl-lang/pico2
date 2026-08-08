@@ -15,19 +15,19 @@
 // against `sysl.sum`, and compiles it as more modules.
 //
 //     dependencies {
-//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.3" }
+//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.4" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.0.3` on this repository. The coordinate names the *package*, `pico2`, while the module a
+// tag `v0.0.4` on this repository. The coordinate names the *package*, `pico2`, while the module a
 // program imports is `sh.sysl.pico2`; `packages.md § 9` keeps those two deliberately apart.
 
 package {
   name    = "pico2"
-  version = "0.0.3"
+  version = "0.0.4"
 }
 
-// **`alloc = true`, and it was not always so.** Until 0.4.0 this package asked for nothing: every
+// **`alloc = true`, and it was not always so.** Until 0.0.3 this package asked for nothing: every
 // name here is a call into C that the SDK's own link satisfies, and a call into C is not a
 // capability.
 //

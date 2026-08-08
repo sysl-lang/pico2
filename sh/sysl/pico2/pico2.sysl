@@ -4,7 +4,7 @@
 // already has, so no C is carried here and there is nothing for a linker to be pointed at — which is
 // what makes it different in kind from the org's other bindings. A program importing this must be
 // built by `sysl build-c` and linked into a CMake project that has the SDK. A plain `sysl build` will
-// compile it and then fail to link, naming `sleep_ms`, and the fault will be the build rather than
+// compile it and then fail to link, naming `sleep_us`, and the fault will be the build rather than
 // the code.
 //
 // **The C surface is next door in `sh.sysl.pico2.externs`, and this module is written in terms of
@@ -12,8 +12,7 @@
 // and the translation between them happens in one place where it can be read. The name is plural
 // because `extern` is a reserved word and cannot be a module path segment. What gets translated is
 // C-isms — an `int` that is really a byte, an `int` that is really a failure, a pin that is really
-// the LED — and the two modules are free to use the same name for the same idea, which `sleep_ms`
-// does.
+// the LED, two functions that are really one idea in two units.
 //
 // **Nothing here can be tested off the target.** There are no `@test` functions because there is
 // nothing a host could run: every function ends in a call to a board.
@@ -22,7 +21,8 @@ module sh.sysl.pico2
 
 import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
-import sysl.text.{from_utf8, is_char_boundary, Utf8Error}
+import sysl.text.str_builder
+import sysl.time.{Duration, millis, whole_micros}
 
 // ## The board
 //
@@ -57,15 +57,17 @@ terminal_connected() -> bool = lib.stdio_usb_connected()
 // Block until a host opens the USB serial port, so that what is printed next is seen.
 wait_for_terminal() =
     while !terminal_connected()
-        sleep_ms(50)
+        sleep(millis(50))
 
 // ## Waiting
 //
-// The same names C uses, because these need no translation — which is the case the two-module split
-// is meant to allow rather than to prevent.
-sleep_ms(ms: u32) = lib.sleep_ms(ms)
-
-sleep_us(us: u64) = lib.sleep_us(us)
+// **One function, where C has two.** `sleep_ms` and `sleep_us` are C's two spellings for one idea,
+// and carrying both would have been this module failing at its job — a caller saying which unit it
+// happens to be thinking in is the C-ism, and `sysl.time` already has a type for a length of time.
+//
+// It goes to `sleep_us` for either, since a `Duration` is microseconds inside and the SDK's
+// millisecond form is the same wait with a multiply in front of it.
+sleep(d: Duration) = lib.sleep_us(u64(whole_micros(d)))
 
 // ## The LED and the supply
 
@@ -147,13 +149,9 @@ read_char() -> Option[char] =
 end read_char
 
 // ## A line of input
-//
-// **sysl has no `\b` escape** — the set is `\n`, `\t`, `\r`, `\0`, `\\`, `\'`, `\"` and `\u{…}` — so
-// the one control character needed by name here is written as its code point and given one.
-private const bs: char = '\u{8}'
 
 // U+FFFD, what a decoder answers for input it cannot make sense of.
-private const replacement: char = '\u{fffd}'
+private const replacement: char = '\u{FFFD}'
 
 // Whether the last line ended with a CR, so that the LF of a CRLF is swallowed rather than read as an
 // empty line following it. It has to outlive one `read_line`, because the two bytes of a CRLF
@@ -167,7 +165,8 @@ private var saw_cr: bool = false
 //
 // *Line endings.* The standard library's line cursor splits on `\n`, which is right for a pipe and
 // wrong for a console: `screen` sends a bare `\r` when Enter is pressed, so a program reading lines
-// that way waits forever. CR, LF and CRLF all end a line here.
+// that way waits forever. `sysl.io` says so in its own documentation now, and points here. CR, LF and
+// CRLF all end a line.
 //
 // *Echo.* A terminal on the other end of a USB CDC port has no line discipline, so nothing appears as
 // it is typed and there is no way to correct a mistake. Backspace and delete both rub a character
@@ -177,16 +176,17 @@ private var saw_cr: bool = false
 // worth an allocator on this board: the SDK links newlib, so there is a heap whether or not this
 // package uses one.
 //
-// **The answer is a `Result` because the bytes might not be UTF-8** — a serial port carries whatever
-// was sent. `sysl.io.line_text` answers that case by printing a panic and calling `exit`, which is
-// the wrong answer on a board with nowhere to exit to, so it is handed back instead.
-read_line() -> Result[string, Utf8Error] =
-    var line: Buf[u8] = buf()
+// **It answers a `string` and cannot fail**, which it could not do while the line was held as bytes.
+// A `Buf[char]` is valid text by construction — every element came out of `read_char`, which is where
+// a malformed byte already became U+FFFD — so there is nothing left to validate at the end and no
+// `Result` for the caller to unwrap.
+read_line() -> string =
+    var line: Buf[char] = buf()
     var at: usize = 0
 
     loop
         read_byte() match
-            None -> return from_utf8(line.view())
+            None -> return finish(&line)
 
             Some(b) ->
                 if b == u8('\r')
@@ -196,25 +196,37 @@ read_line() -> Result[string, Utf8Error] =
                     saw_cr = true
                     at = to_end(&line, at)
                     new_line()
-                    return from_utf8(line.view())
+                    return finish(&line)
                 else if b == u8('\n')
                     if saw_cr
                         saw_cr = false
                     else
                         at = to_end(&line, at)
                         new_line()
-                        return from_utf8(line.view())
+                        return finish(&line)
                 else
                     saw_cr = false
                     at = edit(&line, at, b)
 end read_line
+
+// The characters gathered back into a `string`, which is one `StrBuilder` and no validation.
+private finish(line: *Buf[char]) -> string =
+    var out = str_builder()
+
+    for c in line.view()
+        out.push_char(c)
+
+    out.finish()
 
 // One keystroke's worth of editing, answering where the cursor ended up.
 //
 // Split out because `read_line` above is about *when a line ends*, and this is about what the line
 // says — two questions that were one function until arrow keys arrived, at which point the function
 // stopped fitting on a screen twice over.
-private edit(line: *Buf[u8], at: usize, b: u8) -> usize =
+//
+// A byte that begins a character is read the rest of the way here rather than in `read_line`, so
+// that what goes into the line is always a whole character.
+private edit(line: *Buf[char], at: usize, b: u8) -> usize =
     if b == 27
         escape(line, at)
     else if b == 8 || b == 127
@@ -232,18 +244,52 @@ private edit(line: *Buf[u8], at: usize, b: u8) -> usize =
     else if b == 11
         kill_to_end(line, at)               // Ctrl-K
     else if b >= 32
-        insert(line, at, b)
+        insert(line, at, from_byte(b))
     else
         // Any other control character would move the terminal's cursor without being in the line.
         at
 end edit
+
+// The character a byte begins, read the rest of the way off the port.
+//
+// It is `read_char`'s decode with the lead byte already in hand, which is the shape a line editor
+// needs: the loop above has to look at every byte to find the control keys, so by the time it knows
+// the byte is ordinary text it has already taken it.
+private from_byte(b0: u8) -> char =
+    if b0 < 128 then return char(uint(b0))
+
+    var more = 0
+
+    if b0 & 224 == 192 then more = 1
+    else if b0 & 240 == 224 then more = 2
+    else if b0 & 248 == 240 then more = 3
+
+    // A continuation byte arriving where a leading byte belongs.
+    if more == 0 then return replacement
+
+    val mask = if more == 1 then 31 else if more == 2 then 15 else 7
+    var cp = uint(b0 & u8(mask))
+    var n = 0
+
+    while n < more
+        read_byte() match
+            None -> return replacement
+
+            Some(b) ->
+                if b & 192 != 128 then return replacement
+
+                cp = (cp << 6) | uint(b & 63)
+                n += 1
+
+    char(cp)
+end from_byte
 
 // An escape sequence, of which only `ESC [ …` is understood.
 //
 // **The bytes of a sequence arrive together**, so reading them with the same blocking call the rest
 // of the loop uses is safe in practice. A lone Escape key is the exception: it waits for the next
 // keystroke before deciding, which is what every terminal program does and for the same reason.
-private escape(line: *Buf[u8], at: usize) -> usize =
+private escape(line: *Buf[char], at: usize) -> usize =
     read_byte() match
         None -> at
 
@@ -274,93 +320,54 @@ end escape
 // re-echoing the character under the cursor goes right one. That needs no number formatting, and so
 // no allocation per keystroke.
 //
-// **The line is stored as bytes and the cursor moves by CHARACTERS**, which is the only combination
-// that both keeps `from_utf8` at the end and survives non-ASCII input. `sysl.text.is_char_boundary`
-// is what makes it cheap: a continuation byte is never a place the cursor may rest, so a step is a
-// walk to the next byte that is one.
+// **The line is a `Buf[char]`, so the cursor is an index into it and the arithmetic is `at - 1` and
+// `at + 1`.** It was held as bytes until the standard library could turn characters back into text —
+// `encode_utf8`, which `StrBuilder.push_char` goes through — and that cost sixty lines of walking
+// UTF-8 boundaries by hand, in `left`, `right`, `backspace` and `delete_at` alike. None of it is here
+// now, and one bad byte can no longer be half-erased, because a half character never enters the line.
 //
 // The one thing still assumed is that a character occupies **one column**. A wide character — CJK,
-// most emoji — takes two, so erasing one would leave half of it behind. Getting that right means
-// asking `sysl.text.columns` for a width and counting columns rather than characters, which is a
-// further piece of work and is not done here.
-private prev_boundary(line: *Buf[u8], at: usize) -> usize =
-    var i = at
-
-    while i > 0
-        i -= 1
-
-        if is_char_boundary(line.view()[i]) then return i
-
-    0
-
-private next_boundary(line: *Buf[u8], at: usize) -> usize =
-    var i = at + 1
-
-    while i < line.len() && !is_char_boundary(line.view()[i])
-        i += 1
-
-    if i > line.len() then line.len() else i
-
-// How many characters lie between `from` and the end. A backspace moves one column, and the tail is
-// written as bytes, so this is what the cursor has to walk back over afterwards.
-private chars_from(line: *Buf[u8], from: usize) -> usize =
-    var i = from
-    var n: usize = 0
-
-    while i < line.len()
-        if is_char_boundary(line.view()[i]) then n += 1
-
-        i += 1
-
-    n
-
-private write_from(line: *Buf[u8], from: usize) =
+// most emoji — takes two, so erasing one leaves half of it behind. Getting that right means asking
+// `sysl.text.columns` for a width and counting columns rather than characters, which is a further
+// piece of work and is not done here.
+private write_from(line: *Buf[char], from: usize) =
     var i = from
 
     while i < line.len()
-        write_byte(line.view()[i])
+        write_char(line.view()[i])
         i += 1
 
-private left(line: *Buf[u8], at: usize) -> usize =
+private left(line: *Buf[char], at: usize) -> usize =
     if at == 0 then return at
 
-    write_char(bs)
-    prev_boundary(line, at)
+    write_char('\b')
+    at - 1
 
-private right(line: *Buf[u8], at: usize) -> usize =
+private right(line: *Buf[char], at: usize) -> usize =
     if at >= line.len() then return at
 
-    val to = next_boundary(line, at)
-    var i = at
+    write_char(line.view()[at])
+    at + 1
 
-    while i < to
-        write_byte(line.view()[i])
-        i += 1
-
-    to
-
-private to_start(line: *Buf[u8], at: usize) -> usize =
+private to_start(line: *Buf[char], at: usize) -> usize =
     var i = at
 
     while i > 0
-        write_char(bs)
-        i = prev_boundary(line, i)
+        write_char('\b')
+        i -= 1
 
     0
 
-private to_end(line: *Buf[u8], at: usize) -> usize =
+private to_end(line: *Buf[char], at: usize) -> usize =
     write_from(line, at)
     line.len()
 
 // ### Changing
 //
 // After an edit at `at`, everything to its right has moved, so the tail is written out again and the
-// cursor walked back to where it belongs. `blanks` is how many spaces to paint over what the line no
-// longer covers — one for a deletion, none for an insertion.
-// `blanks` is how many columns to paint over — what the line no longer covers. The walk back counts
-// **characters** in the tail plus those blanks, because a backspace moves one column while the tail
-// was written as bytes.
-private redraw(line: *Buf[u8], at: usize, blanks: usize) =
+// cursor walked back to where it belongs. `blanks` is how many columns to paint over — what the line
+// no longer covers, one for a deletion and none for an insertion.
+private redraw(line: *Buf[char], at: usize, blanks: usize) =
     write_from(line, at)
 
     var pad = blanks
@@ -369,64 +376,37 @@ private redraw(line: *Buf[u8], at: usize, blanks: usize) =
         write_char(' ')
         pad -= 1
 
-    var back = chars_from(line, at) + blanks
+    var back = line.len() - at + blanks
 
     while back > 0
-        write_char(bs)
+        write_char('\b')
         back -= 1
 end redraw
 
-private insert(line: *Buf[u8], at: usize, b: u8) -> usize =
-    // `Buf` has `remove` and no `insert`, so the tail is shifted up by hand.
-    line.push(b)
-
-    var i = line.len() - 1
-
-    while i > at
-        line.set(i, line.view()[i - 1])
-        i -= 1
-
-    line.set(at, b)
-
-    // A byte is echoed rather than a character, and mid-sequence it draws nothing on its own — the
-    // terminal assembles the character once the last byte of it arrives. Redrawing from `at + 1`
-    // keeps that true whether this byte finished a character or not.
-    write_byte(b)
+private insert(line: *Buf[char], at: usize, c: char) -> usize =
+    line.insert(at, c)
+    write_char(c)
     redraw(line, at + 1, 0)
     at + 1
-end insert
 
-private backspace(line: *Buf[u8], at: usize) -> usize =
+private backspace(line: *Buf[char], at: usize) -> usize =
     if at == 0 then return at
 
-    val from = prev_boundary(line, at)
-    var i = at
+    line.remove(at - 1)
+    write_char('\b')
+    redraw(line, at - 1, 1)
+    at - 1
 
-    // Every byte of the character, not just the last one.
-    while i > from
-        i -= 1
-        line.remove(i)
-
-    write_char(bs)
-    redraw(line, from, 1)
-    from
-
-private delete_at(line: *Buf[u8], at: usize) -> usize =
+private delete_at(line: *Buf[char], at: usize) -> usize =
     if at >= line.len() then return at
 
-    val to = next_boundary(line, at)
-    var i = to
-
-    while i > at
-        i -= 1
-        line.remove(i)
-
+    line.remove(at)
     redraw(line, at, 1)
     at
 
 // Ctrl-U — everything gone.
-private kill_line(line: *Buf[u8], at: usize) -> usize =
-    val was = chars_from(line, 0)
+private kill_line(line: *Buf[char], at: usize) -> usize =
+    val was = line.len()
 
     to_start(line, at)
     line.clear()
@@ -434,8 +414,8 @@ private kill_line(line: *Buf[u8], at: usize) -> usize =
     0
 
 // Ctrl-K — everything from the cursor to the end.
-private kill_to_end(line: *Buf[u8], at: usize) -> usize =
-    val dropped = chars_from(line, at)
+private kill_to_end(line: *Buf[char], at: usize) -> usize =
+    val dropped = line.len() - at
 
     line.truncate(at)
     redraw(line, at, dropped)

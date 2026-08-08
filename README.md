@@ -5,6 +5,7 @@ in sysl and hosted by the C SDK.
 
 ```sysl
 import sh.sysl.pico2.*
+import sysl.time.millis
 
 @export("main")
 run() -> int =
@@ -17,9 +18,9 @@ run() -> int =
 
     loop
         led(true)
-        sleep_ms(120)
+        sleep(millis(120))
         led(false)
-        sleep_ms(880)
+        sleep(millis(880))
 ```
 
 That is a whole program. There is no C in it, and no C in the project that builds it: sysl exports
@@ -27,7 +28,7 @@ That is a whole program. There is no C in it, and no C in the project that build
 
 ```hocon
 dependencies {
-  pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.3" }
+  pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.4" }
 }
 ```
 
@@ -69,6 +70,7 @@ What the outer module actually removes:
 | `cyw43_arch_init() -> int`, non-zero for failure | folded into `init() -> bool` |
 | `putchar(c: int) -> int` | `write_byte(b: u8)`, and `write_char(c: char)` |
 | `cyw43_arch_gpio_put(wl_gpio, value)` | `led(on: bool)` |
+| `sleep_ms(u32)` **and** `sleep_us(u64)` | `sleep(d: Duration)` |
 
 A caller writing `if c < 0` is writing C; a caller matching on `None` is writing sysl.
 
@@ -85,8 +87,8 @@ looks dead rather than early.
 **The board.** `led(on)`, `led_is_on()`, `on_usb_power()`, and the three CYW43 pin numbers as
 constants — `led_pin`, `smps_pin`, `vbus_pin`.
 
-**Waiting.** `sleep_ms(ms)`, `sleep_us(us)`. C's two spellings, because `sysl.time` has no `millis`
-or `micros` constructor for a `Duration` yet.
+**Waiting.** `sleep(d: Duration)`. One function where C has two, now that `sysl.time` can name a
+length shorter than a second: `sleep(millis(120))`.
 
 **Bytes and characters.** `read_byte()`/`write_byte()` and `read_char()`/`write_char()`. Both pairs
 exist because they are different things: a `char` is a Unicode scalar and may take four bytes on the
@@ -94,7 +96,8 @@ wire, while echoing a half-typed line wants bytes, since a byte pulled out of on
 yet. `read_char` decodes UTF-8 and answers **U+FFFD** for malformed input, so one bad byte cannot end
 a session; `None` means the input ended.
 
-**A line of text.** `read_line() -> Result[string, Utf8Error]`, echoed as it is typed.
+**A line of text.** `read_line() -> string`, echoed as it is typed. It cannot fail: the line is held
+as characters, and a malformed byte became U+FFFD on the way in.
 
 ## `read_line` is a line editor, and here is why it has to be
 
@@ -116,10 +119,12 @@ mistake cannot be corrected. Nothing else was going to do it:
 | `Ctrl-U` `Ctrl-K` | kill the line, or from the cursor on |
 | `Ctrl-B` `Ctrl-F` | left and right, for readline hands |
 
-The cursor moves by **characters** while the line is stored as **bytes** — `sysl.text.is_char_boundary`
-makes that cheap, and it is the combination that keeps `from_utf8` at the end without needing a
-char-to-bytes encoder, which the standard library does not have. So one backspace erases a whole
-`é` rather than orphaning its lead byte.
+The line is a **`Buf[char]`**, so the cursor is an index into it and moving is `at - 1` and `at + 1`.
+It was held as bytes until sysl 0.0.33, because there was no way to turn characters back into a
+`string` — that cost about sixty lines of walking UTF-8 boundaries by hand, spread through `left`,
+`right`, `backspace` and `delete_at`. `encode_utf8` closed the gap, `StrBuilder.push_char` goes
+through it, and all of that walking is gone. A half character can no longer be left behind by a
+backspace, because a half character never enters the line.
 
 **Still assumed: one character, one column.** A wide character — CJK, most emoji — takes two, so
 erasing one would leave half behind. Fixing that means asking `sysl.text.columns` for a width and
@@ -134,7 +139,7 @@ set(PICO_HARD_FLOAT_ABI 1)          # before the SDK is imported
 
 add_custom_command(
     OUTPUT ${SYSL_ARCHIVE} ${SYSL_ARCHIVE}.h
-    COMMAND sysl build-c ${CMAKE_CURRENT_SOURCE_DIR}/app --target thumb-freestanding --no-std-lib
+    COMMAND sysl build-c ${CMAKE_CURRENT_SOURCE_DIR}/app --target thumb-freestanding
             -o ${SYSL_ARCHIVE}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/app/app.sysl
     VERBATIM)
@@ -149,16 +154,12 @@ must have sources" rule with no C translation unit anywhere.
 
 `sysl-lang/pico-scratch` is a worked example of exactly this — a blink program and a REPL.
 
-### Three things there are load bearing
+### Two things there are load bearing
 
 **`PICO_HARD_FLOAT_ABI`, set before the SDK is imported.** sysl's only Cortex-M33 target is
 `thumbv8m.main-none-eabihf`, which passes floating-point arguments in VFP registers; the SDK defaults
 to `softfp`. GNU ld refuses to merge objects that disagree *whether or not any float crosses the
 boundary*, and the error names VFP register arguments rather than anything you wrote.
-
-**`--no-std-lib`.** It reads as "no standard library" and means "compile the standard module from its
-source rather than linking a prebuilt artifact". Without it the archive refers to library code it
-does not contain, and nothing a C linker can reach provides it.
 
 **`@export`, and not merely a function named `main`.** A `build-c` has no entry point of its own, so
 an export is the only reachability root — with nothing exported the module prunes to nothing, and the
