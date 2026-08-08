@@ -1,169 +1,160 @@
-// The Raspberry Pi Pico 2 W, reached through the C SDK that is hosting the program.
+// The Raspberry Pi Pico 2 W, as sysl rather than as C.
 //
-// **This package declares and does not implement.** Every name below is a symbol the pico-sdk
-// already has, so there is no C carried here and nothing for a linker to be pointed at — which is
-// what makes it different in kind from the org's other bindings, and is the one thing to understand
-// before using it. A program importing this must be built by `sysl build-c` and linked into a CMake
-// project that has the SDK. A plain `sysl build` will compile it and then fail to link, naming
-// `sleep_ms`, and the fault will be the build rather than the code.
+// **This package declares and does not implement.** Every name it rests on is a symbol the pico-sdk
+// already has, so no C is carried here and there is nothing for a linker to be pointed at — which is
+// what makes it different in kind from the org's other bindings. A program importing this must be
+// built by `sysl build-c` and linked into a CMake project that has the SDK. A plain `sysl build` will
+// compile it and then fail to link, naming `sleep_ms`, and the fault will be the build rather than
+// the code.
 //
-// **Nothing here can be tested off the target**, for the same reason. There are no `@test` functions
-// because there is nothing a host could run: every function ends in a call to a board.
+// **The C surface is next door in `sh.sysl.pico2.externs`, and this module is written in terms of
+// it.** That is the whole shape: `externs` is faithful to the header, this one is pleasant to use,
+// and the translation between them happens in one place where it can be read. The name is plural
+// because `extern` is a reserved word and cannot be a module path segment. What gets translated is
+// C-isms — an `int` that is really a byte, an `int` that is really a failure, a pin that is really
+// the LED — and the two modules are free to use the same name for the same idea, which `sleep_ms`
+// does.
 //
-// The signatures were read out of the SDK's own headers rather than remembered — `pico/time.h`,
-// `pico/stdio.h` and `pico/cyw43_arch.h`. That matters more than usual: an `extern` whose signature
-// disagrees with the C declaration links perfectly and corrupts the call at run time, and no part of
-// this arrangement checks one against the other.
+// **Nothing here can be tested off the target.** There are no `@test` functions because there is
+// nothing a host could run: every function ends in a call to a board.
 
 module sh.sysl.pico2
 
+import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
 import sysl.text.{from_utf8, Utf8Error}
 
-// ## What the SDK supplies
+// ## The board
 //
-// Bring up whichever stdio the CMake build selected — `pico_enable_stdio_usb` for the USB serial
-// port, `pico_enable_stdio_uart` for the pins. Printing works after this: sysl's `print` reaches
-// `putchar`, which the SDK has already wired to the choice made there.
-extern "stdio_init_all" stdio_init_all() -> bool
-
-// Whether a host has opened the USB serial port.
-//
-// **A board prints into nowhere until this is true** — the SDK discards stdio output with no host
-// attached, so a banner written at startup is simply lost, and the program looks dead rather than
-// early. A program whose first output matters should wait, which `wait_for_terminal` does.
-extern "stdio_usb_connected" stdio_usb_connected() -> bool
-
-// One byte of input, blocking until there is one. **`PICO_ERROR_TIMEOUT` (-1) on failure**, so the
-// answer is an `int` rather than a byte.
-extern "stdio_getchar" stdio_getchar() -> int
-
-// One byte of output.
-//
-// The standard library binds this too, for `print`, but keeps it `private[sysl]` — and says why:
-// the link names stay free so that a program can declare them itself. This is a program doing
-// exactly that. It is needed because echoing works a character at a time, and going through
-// `prints` would build a string per keystroke.
-extern "putchar" putchar(c: int) -> int
-
-// The wireless chip, which on this board owns the LED as well as the radio. Answers **non-zero on
-// failure**, C-style, rather than truthy on success.
-extern "cyw43_arch_init" cyw43_arch_init() -> int
-
-extern "cyw43_arch_deinit" cyw43_arch_deinit()
-
-// One of the CYW43439's own GPIOs — not an RP2350 pin, and not reachable with a GPIO write.
-extern "cyw43_arch_gpio_put" cyw43_arch_gpio_put(wl_gpio: uint, on: bool)
-
-extern "cyw43_arch_gpio_get" cyw43_arch_gpio_get(wl_gpio: uint) -> bool
-
-extern "sleep_ms" sleep_ms(ms: u32)
-
-extern "sleep_us" sleep_us(us: u64)
-
-// ## What the board is
-//
-// `CYW43_WL_GPIO_LED_PIN`, from `boards/pico2_w.h`. **This is a board fact and not a chip fact** —
-// the LED is wired to the wireless chip on a Pico 2 W, and a plain Pico 2 puts it on an ordinary
-// RP2350 pin instead.
+// `CYW43_WL_GPIO_LED_PIN`, from `boards/pico2_w.h`. **A board fact and not a chip fact** — the LED is
+// wired to the wireless chip on a Pico 2 W, and a plain Pico 2 puts it on an ordinary RP2350 pin.
 const led_pin: uint = 0
 
-// `CYW43_WL_GPIO_SMPS_PIN` — drives the switched-mode supply into PWM mode, which trades efficiency
-// at low load for less ripple.
+// `CYW43_WL_GPIO_SMPS_PIN` — drives the switched-mode supply into PWM mode, trading efficiency at low
+// load for less ripple.
 const smps_pin: uint = 1
 
 // `CYW43_WL_GPIO_VBUS_PIN` — reads whether USB power is present.
 const vbus_pin: uint = 2
 
-// ## The shape a program actually wants
+// ## Starting up
 //
-// Bring the board up: stdio first, so that a failure in the second half can be reported. Answers
-// whether the wireless chip started, and a caller that only wants the LED still has to check it.
+// Bring the board up: stdio first, so that a failure in the second half has somewhere to be reported.
+//
+// **Answers whether the wireless chip started**, where C answers non-zero on failure. A caller that
+// only wants the LED still has to check it, because the LED is on that chip.
 init() -> bool =
-    stdio_init_all()
-    cyw43_arch_init() == 0
+    lib.stdio_init_all()
+    lib.cyw43_arch_init() == 0
 
-led(on: bool) = cyw43_arch_gpio_put(led_pin, on)
+// Whether a host has opened the USB serial port.
+//
+// **A board prints into nowhere until this is true** — the SDK discards stdio output with no host
+// attached, so a banner written at startup is simply lost and the program looks dead rather than
+// early.
+terminal_connected() -> bool = lib.stdio_usb_connected()
 
 // Block until a host opens the USB serial port, so that what is printed next is seen.
-//
-// A program that does not do this and prints at startup will look dead: the SDK discards output with
-// no host attached, and by the time `screen` is running the banner is long gone.
 wait_for_terminal() =
-    while !stdio_usb_connected()
+    while !terminal_connected()
         sleep_ms(50)
 
-// Whether the last line ended with a CR, so that the LF of a CRLF is swallowed rather than read as
-// an empty line that follows it. It has to outlive one `read_line`, because the two bytes of a CRLF
+// ## Waiting
+//
+// The same names C uses, because these need no translation — which is the case the two-module split
+// is meant to allow rather than to prevent.
+sleep_ms(ms: u32) = lib.sleep_ms(ms)
+
+sleep_us(us: u64) = lib.sleep_us(us)
+
+// ## The LED and the supply
+
+led(on: bool) = lib.cyw43_arch_gpio_put(led_pin, on)
+
+led_is_on() -> bool = lib.cyw43_arch_gpio_get(led_pin)
+
+// Whether the board is running on USB power rather than on its own supply.
+on_usb_power() -> bool = lib.cyw43_arch_gpio_get(vbus_pin)
+
+// ## Bytes in and out
+//
+// **`None` at end of input, where C answers `-1` in the same `int` it uses for the byte.** That is
+// the C-ism this module exists to remove: a caller writing `if c < 0` is writing C, and a caller
+// matching on `None` is writing sysl.
+read_byte() -> Option[u8] =
+    val c = lib.stdio_getchar()
+
+    if c < 0 then None else Some(u8(c))
+
+write_byte(b: u8) = lib.putchar(int(b))
+
+// ## A line of input
+//
+// Whether the last line ended with a CR, so that the LF of a CRLF is swallowed rather than read as an
+// empty line following it. It has to outlive one `read_line`, because the two bytes of a CRLF
 // straddle the boundary between one line and the next.
 private var saw_cr: bool = false
 
-// One line of input, without its terminator, as bytes — **echoed as it is typed**.
+// One line of input, without its terminator — **echoed as it is typed**.
 //
-// **This exists because a serial terminal is not a file and is not a shell.** Two things a hosted
-// program never has to think about are missing here, and each one makes a REPL look broken in a
-// different way:
+// **This exists because a serial terminal is neither a file nor a shell.** Two things a hosted
+// program never thinks about are missing, and each makes a REPL look broken in its own way:
 //
 // *Line endings.* The standard library's line cursor splits on `\n`, which is right for a pipe and
 // wrong for a console: `screen` sends a bare `\r` when Enter is pressed, so a program reading lines
 // that way waits forever. CR, LF and CRLF all end a line here.
 //
-// *Echo.* A terminal on the other end of a USB CDC port has no line discipline, so nothing appears
-// as it is typed and there is no way to correct a mistake. Nothing is going to do that but this
-// function. Backspace and delete both rub a character out, and Enter echoes CRLF so that what the
-// program prints next starts on a line of its own.
+// *Echo.* A terminal on the other end of a USB CDC port has no line discipline, so nothing appears as
+// it is typed and there is no way to correct a mistake. Backspace and delete both rub a character
+// out, and Enter echoes CRLF so that what the program prints next starts on a line of its own.
 //
-// The line grows as it is typed rather than being bounded by a buffer the caller had to size, which
-// is worth an allocator on this board: the SDK links newlib, so there is a heap whether or not this
+// The line grows as it is typed rather than being bounded by a size the caller had to guess, which is
+// worth an allocator on this board: the SDK links newlib, so there is a heap whether or not this
 // package uses one.
 //
 // **The answer is a `Result` because the bytes might not be UTF-8** — a serial port carries whatever
-// was sent. `sysl.io.line_text` handles that case by printing a panic and calling `exit`, which is
-// the wrong answer on a board that has nowhere to exit to, so it is handed back instead. The caller
-// already had to match on something.
+// was sent. `sysl.io.line_text` answers that case by printing a panic and calling `exit`, which is
+// the wrong answer on a board with nowhere to exit to, so it is handed back instead.
 read_line() -> Result[string, Utf8Error] =
     var line: Buf[u8] = buf()
 
     loop
-        val c = stdio_getchar()
+        read_byte() match
+            None -> return from_utf8(line.view())
 
-        if c < 0 then return from_utf8(line.view())
+            Some(b) ->
+                if b == u8('\r')
+                    // CR ends the line. Whether an LF follows is not known yet, so it is remembered
+                    // rather than waited for: a terminal sending bare CR would never send one, and
+                    // waiting would hang until the next keystroke.
+                    saw_cr = true
+                    new_line()
+                    return from_utf8(line.view())
+                else if b == u8('\n')
+                    if saw_cr
+                        saw_cr = false
+                    else
+                        new_line()
+                        return from_utf8(line.view())
+                else if b == 8 || b == 127
+                    saw_cr = false
 
-        val b = u8(c)
+                    // Rub the character out on the way back: over it with a space, and back again.
+                    if line.len() > 0
+                        line.truncate(line.len() - 1)
+                        write_byte(8)
+                        write_byte(32)
+                        write_byte(8)
+                else
+                    saw_cr = false
 
-        if b == u8('\r')
-            // CR ends the line. Whether an LF follows is not known yet, so it is remembered rather
-            // than waited for: a terminal sending bare CR would never send one, and waiting would
-            // hang until the next keystroke.
-            saw_cr = true
-            putchar(13)
-            putchar(10)
-            return from_utf8(line.view())
-        else if b == u8('\n')
-            if saw_cr
-                saw_cr = false
-            else
-                putchar(13)
-                putchar(10)
-                return from_utf8(line.view())
-        else if b == 8 || b == 127
-            saw_cr = false
-
-            // Rub the character out on the way back: over it with a space, and back again.
-            if line.len() > 0
-                line.truncate(line.len() - 1)
-                putchar(8)
-                putchar(32)
-                putchar(8)
-        else
-            saw_cr = false
-
-            // Control characters other than the ones handled above would move the cursor about
-            // without being in the line, so they are dropped rather than echoed.
-            if b >= 32
-                line.push(b)
-                putchar(int(b))
+                    // Control characters other than the ones handled above would move the cursor
+                    // about without being in the line, so they are dropped rather than echoed.
+                    if b >= 32
+                        line.push(b)
+                        write_byte(b)
 end read_line
 
-// Whether the board is running on USB power rather than on its own supply.
-on_usb_power() -> bool = cyw43_arch_gpio_get(vbus_pin)
+private new_line() =
+    write_byte(13)
+    write_byte(10)

@@ -1,0 +1,57 @@
+// The pico-sdk's own surface, declared verbatim.
+//
+// **Nothing here is meant to be called by a program.** Every name, every type and every convention is
+// C's: an error is a non-zero `int`, a byte is an `int` so that `-1` can mean failure, and a pin is a
+// bare number. The module beside this one turns those into sysl and is what an application imports.
+//
+// The split is worth the file because it keeps two jobs apart. This one has to be *faithful* — a
+// signature that disagrees with the C header links perfectly and corrupts the call at run time, and
+// nothing in this arrangement checks one against the other, so each declaration below was read out of
+// the header named above it rather than remembered. The other one has to be *pleasant*, which is a
+// different question and would otherwise be answered in the same breath.
+//
+// It also means both modules may use a name: `sleep_ms` here is C's, and `sleep_ms` next door is
+// sysl's, and neither has to be renamed to avoid the other.
+
+module sh.sysl.pico2.externs
+
+// ## `pico/stdio.h`
+
+// Brings up whichever stdio the CMake build selected — `pico_enable_stdio_usb` for the USB serial
+// port, `pico_enable_stdio_uart` for the pins.
+extern "stdio_init_all" stdio_init_all() -> bool
+
+// One byte of input, blocking until there is one. **`PICO_ERROR_TIMEOUT` (-1) on failure**, which is
+// why the answer is an `int` and not a byte.
+extern "stdio_getchar" stdio_getchar() -> int
+
+// ## `pico/stdio_usb.h`
+
+// Whether a host has opened the USB serial port. The SDK discards stdio output while this is false.
+extern "stdio_usb_connected" stdio_usb_connected() -> bool
+
+// ## `pico/time.h`
+
+extern "sleep_ms" sleep_ms(ms: u32)
+
+extern "sleep_us" sleep_us(us: u64)
+
+// ## `pico/cyw43_arch.h`
+
+// **Non-zero on failure**, C-style, rather than truthy on success.
+extern "cyw43_arch_init" cyw43_arch_init() -> int
+
+extern "cyw43_arch_deinit" cyw43_arch_deinit()
+
+// A GPIO belonging to the CYW43439 rather than to the RP2350, so `gpio_put` cannot reach it.
+extern "cyw43_arch_gpio_put" cyw43_arch_gpio_put(wl_gpio: uint, on: bool)
+
+extern "cyw43_arch_gpio_get" cyw43_arch_gpio_get(wl_gpio: uint) -> bool
+
+// ## C, through newlib
+//
+// The standard module binds this too, for `print`, but keeps it `private[sysl]` — and
+// `sysl/sys/platform.sysl` says why: the link names stay free so that a program can declare them
+// itself. This is a program doing exactly that, because echoing input works a character at a time and
+// going through `prints` would build a string per keystroke.
+extern "putchar" putchar(c: int) -> int
