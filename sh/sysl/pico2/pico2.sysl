@@ -88,8 +88,21 @@ read_byte() -> Option[u8] =
 
 write_byte(b: u8) = lib.putchar(int(b))
 
+// One character, encoded as UTF-8 — **which is a different thing from one byte, and the reason both
+// exist.** A `char` is a Unicode scalar value, so writing one may put up to four bytes on the wire;
+// `write_byte` puts exactly the byte it is given. Text wants the first, and echoing what arrived on a
+// serial port wants the second, because a byte pulled out of a half-typed line is not a character
+// yet.
+//
+// The encoding is `sysl.printc`'s, which ends at the same `putchar` this module declares.
+write_char(c: char) = printc(c)
+
 // ## A line of input
 //
+// **sysl has no `\b` escape** — the set is `\n`, `\t`, `\r`, `\0`, `\\`, `\'`, `\"` and `\u{…}` — so
+// the one control character needed by name here is written as its code point and given one.
+private const bs: char = '\u{8}'
+
 // Whether the last line ended with a CR, so that the LF of a CRLF is swallowed rather than read as an
 // empty line following it. It has to outlive one `read_line`, because the two bytes of a CRLF
 // straddle the boundary between one line and the next.
@@ -117,6 +130,7 @@ private var saw_cr: bool = false
 // the wrong answer on a board with nowhere to exit to, so it is handed back instead.
 read_line() -> Result[string, Utf8Error] =
     var line: Buf[u8] = buf()
+    var at: usize = 0
 
     loop
         read_byte() match
@@ -128,33 +142,193 @@ read_line() -> Result[string, Utf8Error] =
                     // rather than waited for: a terminal sending bare CR would never send one, and
                     // waiting would hang until the next keystroke.
                     saw_cr = true
+                    at = to_end(&line, at)
                     new_line()
                     return from_utf8(line.view())
                 else if b == u8('\n')
                     if saw_cr
                         saw_cr = false
                     else
+                        at = to_end(&line, at)
                         new_line()
                         return from_utf8(line.view())
-                else if b == 8 || b == 127
-                    saw_cr = false
-
-                    // Rub the character out on the way back: over it with a space, and back again.
-                    if line.len() > 0
-                        line.truncate(line.len() - 1)
-                        write_byte(8)
-                        write_byte(32)
-                        write_byte(8)
                 else
                     saw_cr = false
-
-                    // Control characters other than the ones handled above would move the cursor
-                    // about without being in the line, so they are dropped rather than echoed.
-                    if b >= 32
-                        line.push(b)
-                        write_byte(b)
+                    at = edit(&line, at, b)
 end read_line
 
+// One keystroke's worth of editing, answering where the cursor ended up.
+//
+// Split out because `read_line` above is about *when a line ends*, and this is about what the line
+// says — two questions that were one function until arrow keys arrived, at which point the function
+// stopped fitting on a screen twice over.
+private edit(line: *Buf[u8], at: usize, b: u8) -> usize =
+    if b == 27
+        escape(line, at)
+    else if b == 8 || b == 127
+        backspace(line, at)
+    else if b == 1
+        to_start(line, at)                  // Ctrl-A
+    else if b == 5
+        to_end(line, at)                    // Ctrl-E
+    else if b == 2
+        left(line, at)                      // Ctrl-B
+    else if b == 6
+        right(line, at)                     // Ctrl-F
+    else if b == 21
+        kill_line(line, at)                 // Ctrl-U
+    else if b == 11
+        kill_to_end(line, at)               // Ctrl-K
+    else if b >= 32
+        insert(line, at, b)
+    else
+        // Any other control character would move the terminal's cursor without being in the line.
+        at
+end edit
+
+// An escape sequence, of which only `ESC [ …` is understood.
+//
+// **The bytes of a sequence arrive together**, so reading them with the same blocking call the rest
+// of the loop uses is safe in practice. A lone Escape key is the exception: it waits for the next
+// keystroke before deciding, which is what every terminal program does and for the same reason.
+private escape(line: *Buf[u8], at: usize) -> usize =
+    read_byte() match
+        None -> at
+
+        Some(bracket) ->
+            if bracket != u8('[') then return at
+
+            read_byte() match
+                None -> at
+
+                Some(c) ->
+                    if c == u8('D') then left(line, at)
+                    else if c == u8('C') then right(line, at)
+                    else if c == u8('H') then to_start(line, at)
+                    else if c == u8('F') then to_end(line, at)
+                    else if c == u8('3')
+                        // Delete arrives as `ESC [ 3 ~`, so the tilde has to be taken as well.
+                        read_byte()
+                        delete_at(line, at)
+                    else
+                        // Up, down, and everything else with a longer form: swallowed rather than
+                        // echoed, since echoing it would move the cursor off the line.
+                        at
+end escape
+
+// ### Moving
+//
+// The cursor is moved by writing rather than by an escape sequence: a backspace goes left one, and
+// re-echoing the character under the cursor goes right one. That needs no number formatting, and so
+// no allocation per keystroke.
+//
+// **All of this counts bytes rather than characters**, so editing a line containing non-ASCII text
+// will step into the middle of a UTF-8 sequence and draw the wrong thing. Typing it is fine; going
+// back over it is not. A terminal on a microcontroller is an ASCII place in practice, and fixing it
+// properly means decoding backwards, which is a different piece of work.
+private left(line: *Buf[u8], at: usize) -> usize =
+    if at == 0 then return at
+
+    write_char(bs)
+    at - 1
+
+private right(line: *Buf[u8], at: usize) -> usize =
+    if at >= line.len() then return at
+
+    write_byte(line.view()[at])
+    at + 1
+
+private to_start(line: *Buf[u8], at: usize) -> usize =
+    var i = at
+
+    while i > 0
+        write_char(bs)
+        i -= 1
+
+    0
+
+private to_end(line: *Buf[u8], at: usize) -> usize =
+    var i = at
+
+    while i < line.len()
+        write_byte(line.view()[i])
+        i += 1
+
+    line.len()
+
+// ### Changing
+//
+// After an edit at `at`, everything to its right has moved, so the tail is written out again and the
+// cursor walked back to where it belongs. `blanks` is how many spaces to paint over what the line no
+// longer covers — one for a deletion, none for an insertion.
+private redraw(line: *Buf[u8], at: usize, blanks: usize) =
+    var i = at
+
+    while i < line.len()
+        write_byte(line.view()[i])
+        i += 1
+
+    var pad = blanks
+
+    while pad > 0
+        write_char(' ')
+        pad -= 1
+
+    var back = line.len() - at + blanks
+
+    while back > 0
+        write_char(bs)
+        back -= 1
+end redraw
+
+private insert(line: *Buf[u8], at: usize, b: u8) -> usize =
+    // `Buf` has `remove` and no `insert`, so the tail is shifted up by hand.
+    line.push(b)
+
+    var i = line.len() - 1
+
+    while i > at
+        line.set(i, line.view()[i - 1])
+        i -= 1
+
+    line.set(at, b)
+
+    write_byte(b)
+    redraw(line, at + 1, 0)
+    at + 1
+end insert
+
+private backspace(line: *Buf[u8], at: usize) -> usize =
+    if at == 0 then return at
+
+    line.remove(at - 1)
+    write_char(bs)
+    redraw(line, at - 1, 1)
+    at - 1
+
+private delete_at(line: *Buf[u8], at: usize) -> usize =
+    if at >= line.len() then return at
+
+    line.remove(at)
+    redraw(line, at, 1)
+    at
+
+// Ctrl-U — everything gone.
+private kill_line(line: *Buf[u8], at: usize) -> usize =
+    val start = to_start(line, at)
+
+    line.clear()
+    redraw(line, 0, at)
+    start
+
+// Ctrl-K — everything from the cursor to the end.
+private kill_to_end(line: *Buf[u8], at: usize) -> usize =
+    val dropped = line.len() - at
+
+    line.truncate(at)
+    redraw(line, at, dropped)
+    at
+
 private new_line() =
-    write_byte(13)
-    write_byte(10)
+    write_char('\r')
+    write_char('\n')
