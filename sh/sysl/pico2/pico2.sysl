@@ -17,6 +17,9 @@
 
 module sh.sysl.pico2
 
+import sysl.buf.{Buf, buf}
+import sysl.text.{from_utf8, Utf8Error}
+
 // ## What the SDK supplies
 //
 // Bring up whichever stdio the CMake build selected — `pico_enable_stdio_usb` for the USB serial
@@ -110,17 +113,21 @@ private var saw_cr: bool = false
 // function. Backspace and delete both rub a character out, and Enter echoes CRLF so that what the
 // program prints next starts on a line of its own.
 //
-// The caller supplies the storage, so this needs no allocator and can be used on a target that has
-// none. A line longer than the buffer stops accepting characters rather than overrunning, and stops
-// echoing them too, so what is on screen is what will be returned. The answer is how many bytes
-// were taken.
-read_line(into: []u8) -> usize =
-    var n: usize = 0
+// The line grows as it is typed rather than being bounded by a buffer the caller had to size, which
+// is worth an allocator on this board: the SDK links newlib, so there is a heap whether or not this
+// package uses one.
+//
+// **The answer is a `Result` because the bytes might not be UTF-8** — a serial port carries whatever
+// was sent. `sysl.io.line_text` handles that case by printing a panic and calling `exit`, which is
+// the wrong answer on a board that has nowhere to exit to, so it is handed back instead. The caller
+// already had to match on something.
+read_line() -> Result[string, Utf8Error] =
+    var line: Buf[u8] = buf()
 
     loop
         val c = stdio_getchar()
 
-        if c < 0 then return n
+        if c < 0 then return from_utf8(line.view())
 
         val b = u8(c)
 
@@ -131,20 +138,20 @@ read_line(into: []u8) -> usize =
             saw_cr = true
             putchar(13)
             putchar(10)
-            return n
+            return from_utf8(line.view())
         else if b == u8('\n')
             if saw_cr
                 saw_cr = false
             else
                 putchar(13)
                 putchar(10)
-                return n
+                return from_utf8(line.view())
         else if b == 8 || b == 127
             saw_cr = false
 
             // Rub the character out on the way back: over it with a space, and back again.
-            if n > 0
-                n -= 1
+            if line.len() > 0
+                line.truncate(line.len() - 1)
                 putchar(8)
                 putchar(32)
                 putchar(8)
@@ -153,9 +160,8 @@ read_line(into: []u8) -> usize =
 
             // Control characters other than the ones handled above would move the cursor about
             // without being in the line, so they are dropped rather than echoed.
-            if b >= 32 && n < into.len
-                into[n] = b
-                n += 1
+            if b >= 32
+                line.push(b)
                 putchar(int(b))
 
 // Whether the board is running on USB power rather than on its own supply.

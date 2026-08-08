@@ -15,21 +15,34 @@
 // against `sysl.sum`, and compiles it as more modules.
 //
 //     dependencies {
-//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.3.0" }
+//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.4.0" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.3.0` on this repository. The coordinate names the *package*, `pico2`, while the module a
+// tag `v0.4.0` on this repository. The coordinate names the *package*, `pico2`, while the module a
 // program imports is `sh.sysl.pico2`; `packages.md § 9` keeps those two deliberately apart.
 
 package {
   name    = "pico2"
-  version = "0.3.0"
+  version = "0.4.0"
 }
 
-// **There is deliberately no `requires` block.** This asks for no allocator and no operating system,
-// because a microcontroller has neither -- every name here is a call into C that the SDK's own link
-// satisfies, and a call into C is not a capability.
+// **`alloc = true`, and it was not always so.** Until 0.4.0 this package asked for nothing: every
+// name here is a call into C that the SDK's own link satisfies, and a call into C is not a
+// capability.
+//
+// What changed is `read_line`, which answers a `string` that grows as the line is typed rather than
+// filling a buffer the caller had to size in advance. **That is a deliberate trade and not a slip.**
+// The SDK links newlib, so this board has a heap whether or not this package touches one, and
+// refusing to use it bought an API every caller had to work around. A target with genuinely no
+// allocator wants different code -- and would want a different package anyway, since this one *is*
+// the SDK's board and the SDK is what brings the heap.
+//
+// **No operating system, though, and there should never be one here.**
+requires {
+  alloc = true
+}
+
 //
 // **What it also does not do is carry a `@link` directive**, and the reason is different from every
 // other package in the org. termbox2 has none because its implementation is vendored and compiled
