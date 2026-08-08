@@ -22,7 +22,7 @@ module sh.sysl.pico2
 
 import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
-import sysl.text.{from_utf8, Utf8Error}
+import sysl.text.{from_utf8, is_char_boundary, Utf8Error}
 
 // ## The board
 //
@@ -274,38 +274,82 @@ end escape
 // re-echoing the character under the cursor goes right one. That needs no number formatting, and so
 // no allocation per keystroke.
 //
-// **All of this counts bytes rather than characters**, so editing a line containing non-ASCII text
-// will step into the middle of a UTF-8 sequence and draw the wrong thing. Typing it is fine; going
-// back over it is not. A terminal on a microcontroller is an ASCII place in practice, and fixing it
-// properly means decoding backwards, which is a different piece of work.
+// **The line is stored as bytes and the cursor moves by CHARACTERS**, which is the only combination
+// that both keeps `from_utf8` at the end and survives non-ASCII input. `sysl.text.is_char_boundary`
+// is what makes it cheap: a continuation byte is never a place the cursor may rest, so a step is a
+// walk to the next byte that is one.
+//
+// The one thing still assumed is that a character occupies **one column**. A wide character — CJK,
+// most emoji — takes two, so erasing one would leave half of it behind. Getting that right means
+// asking `sysl.text.columns` for a width and counting columns rather than characters, which is a
+// further piece of work and is not done here.
+private prev_boundary(line: *Buf[u8], at: usize) -> usize =
+    var i = at
+
+    while i > 0
+        i -= 1
+
+        if is_char_boundary(line.view()[i]) then return i
+
+    0
+
+private next_boundary(line: *Buf[u8], at: usize) -> usize =
+    var i = at + 1
+
+    while i < line.len() && !is_char_boundary(line.view()[i])
+        i += 1
+
+    if i > line.len() then line.len() else i
+
+// How many characters lie between `from` and the end. A backspace moves one column, and the tail is
+// written as bytes, so this is what the cursor has to walk back over afterwards.
+private chars_from(line: *Buf[u8], from: usize) -> usize =
+    var i = from
+    var n: usize = 0
+
+    while i < line.len()
+        if is_char_boundary(line.view()[i]) then n += 1
+
+        i += 1
+
+    n
+
+private write_from(line: *Buf[u8], from: usize) =
+    var i = from
+
+    while i < line.len()
+        write_byte(line.view()[i])
+        i += 1
+
 private left(line: *Buf[u8], at: usize) -> usize =
     if at == 0 then return at
 
     write_char(bs)
-    at - 1
+    prev_boundary(line, at)
 
 private right(line: *Buf[u8], at: usize) -> usize =
     if at >= line.len() then return at
 
-    write_byte(line.view()[at])
-    at + 1
+    val to = next_boundary(line, at)
+    var i = at
+
+    while i < to
+        write_byte(line.view()[i])
+        i += 1
+
+    to
 
 private to_start(line: *Buf[u8], at: usize) -> usize =
     var i = at
 
     while i > 0
         write_char(bs)
-        i -= 1
+        i = prev_boundary(line, i)
 
     0
 
 private to_end(line: *Buf[u8], at: usize) -> usize =
-    var i = at
-
-    while i < line.len()
-        write_byte(line.view()[i])
-        i += 1
-
+    write_from(line, at)
     line.len()
 
 // ### Changing
@@ -313,12 +357,11 @@ private to_end(line: *Buf[u8], at: usize) -> usize =
 // After an edit at `at`, everything to its right has moved, so the tail is written out again and the
 // cursor walked back to where it belongs. `blanks` is how many spaces to paint over what the line no
 // longer covers — one for a deletion, none for an insertion.
+// `blanks` is how many columns to paint over — what the line no longer covers. The walk back counts
+// **characters** in the tail plus those blanks, because a backspace moves one column while the tail
+// was written as bytes.
 private redraw(line: *Buf[u8], at: usize, blanks: usize) =
-    var i = at
-
-    while i < line.len()
-        write_byte(line.view()[i])
-        i += 1
+    write_from(line, at)
 
     var pad = blanks
 
@@ -326,7 +369,7 @@ private redraw(line: *Buf[u8], at: usize, blanks: usize) =
         write_char(' ')
         pad -= 1
 
-    var back = line.len() - at + blanks
+    var back = chars_from(line, at) + blanks
 
     while back > 0
         write_char(bs)
@@ -345,6 +388,9 @@ private insert(line: *Buf[u8], at: usize, b: u8) -> usize =
 
     line.set(at, b)
 
+    // A byte is echoed rather than a character, and mid-sequence it draws nothing on its own — the
+    // terminal assembles the character once the last byte of it arrives. Redrawing from `at + 1`
+    // keeps that true whether this byte finished a character or not.
     write_byte(b)
     redraw(line, at + 1, 0)
     at + 1
@@ -353,29 +399,43 @@ end insert
 private backspace(line: *Buf[u8], at: usize) -> usize =
     if at == 0 then return at
 
-    line.remove(at - 1)
+    val from = prev_boundary(line, at)
+    var i = at
+
+    // Every byte of the character, not just the last one.
+    while i > from
+        i -= 1
+        line.remove(i)
+
     write_char(bs)
-    redraw(line, at - 1, 1)
-    at - 1
+    redraw(line, from, 1)
+    from
 
 private delete_at(line: *Buf[u8], at: usize) -> usize =
     if at >= line.len() then return at
 
-    line.remove(at)
+    val to = next_boundary(line, at)
+    var i = to
+
+    while i > at
+        i -= 1
+        line.remove(i)
+
     redraw(line, at, 1)
     at
 
 // Ctrl-U — everything gone.
 private kill_line(line: *Buf[u8], at: usize) -> usize =
-    val start = to_start(line, at)
+    val was = chars_from(line, 0)
 
+    to_start(line, at)
     line.clear()
-    redraw(line, 0, at)
-    start
+    redraw(line, 0, was)
+    0
 
 // Ctrl-K — everything from the cursor to the end.
 private kill_to_end(line: *Buf[u8], at: usize) -> usize =
-    val dropped = line.len() - at
+    val dropped = chars_from(line, at)
 
     line.truncate(at)
     redraw(line, at, dropped)
