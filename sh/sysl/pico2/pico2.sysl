@@ -24,6 +24,17 @@ module sh.sysl.pico2
 // `putchar`, which the SDK has already wired to the choice made there.
 extern "stdio_init_all" stdio_init_all() -> bool
 
+// Whether a host has opened the USB serial port.
+//
+// **A board prints into nowhere until this is true** — the SDK discards stdio output with no host
+// attached, so a banner written at startup is simply lost, and the program looks dead rather than
+// early. A program whose first output matters should wait, which `wait_for_terminal` does.
+extern "stdio_usb_connected" stdio_usb_connected() -> bool
+
+// One byte of input, blocking until there is one. **`PICO_ERROR_TIMEOUT` (-1) on failure**, so the
+// answer is an `int` rather than a byte.
+extern "stdio_getchar" stdio_getchar() -> int
+
 // The wireless chip, which on this board owns the LED as well as the radio. Answers **non-zero on
 // failure**, C-style, rather than truthy on success.
 extern "cyw43_arch_init" cyw43_arch_init() -> int
@@ -62,6 +73,58 @@ init() -> bool =
     cyw43_arch_init() == 0
 
 led(on: bool) = cyw43_arch_gpio_put(led_pin, on)
+
+// Block until a host opens the USB serial port, so that what is printed next is seen.
+//
+// A program that does not do this and prints at startup will look dead: the SDK discards output with
+// no host attached, and by the time `screen` is running the banner is long gone.
+wait_for_terminal() =
+    while !stdio_usb_connected()
+        sleep_ms(50)
+
+// Whether the last line ended with a CR, so that the LF of a CRLF is swallowed rather than read as
+// an empty line that follows it. It has to outlive one `read_line`, because the two bytes of a CRLF
+// straddle the boundary between one line and the next.
+private var saw_cr: bool = false
+
+// One line of input, without its terminator, as bytes.
+//
+// **This exists because a serial terminal does not agree with a file about what ends a line.** The
+// standard library's line cursor splits on `\n`, which is right for a pipe and wrong for a console:
+// `screen` sends a bare `\r` when Enter is pressed, so a program reading lines that way waits
+// forever and looks broken. Here CR, LF and CRLF all end a line, which is what every serial console
+// has always had to do.
+//
+// The caller supplies the storage, so this needs no allocator and can be used on a target that has
+// none. A line longer than the buffer is cut rather than refused; the answer is how many bytes were
+// taken.
+read_line(into: []u8) -> usize =
+    var n: usize = 0
+
+    loop
+        val c = stdio_getchar()
+
+        if c < 0 then return n
+
+        val b = u8(c)
+
+        if b == u8('\r')
+            // CR ends the line. Whether an LF follows is not known yet, so it is remembered rather
+            // than waited for: a terminal sending bare CR would never send one, and waiting would
+            // hang until the next keystroke.
+            saw_cr = true
+            return n
+        else if b == u8('\n')
+            if saw_cr
+                saw_cr = false
+            else
+                return n
+        else
+            saw_cr = false
+
+            if n < into.len
+                into[n] = b
+                n += 1
 
 // Whether the board is running on USB power rather than on its own supply.
 on_usb_power() -> bool = cyw43_arch_gpio_get(vbus_pin)
