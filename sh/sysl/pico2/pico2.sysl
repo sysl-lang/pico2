@@ -163,6 +163,7 @@ read_line() -> Result[string, Utf8Error] =
             if b >= 32
                 line.push(b)
                 putchar(int(b))
+end read_line
 
 // Whether the board is running on USB power rather than on its own supply.
 on_usb_power() -> bool = cyw43_arch_gpio_get(vbus_pin)
