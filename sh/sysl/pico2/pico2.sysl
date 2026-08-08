@@ -35,6 +35,14 @@ extern "stdio_usb_connected" stdio_usb_connected() -> bool
 // answer is an `int` rather than a byte.
 extern "stdio_getchar" stdio_getchar() -> int
 
+// One byte of output.
+//
+// The standard library binds this too, for `print`, but keeps it `private[sysl]` — and says why:
+// the link names stay free so that a program can declare them itself. This is a program doing
+// exactly that. It is needed because echoing works a character at a time, and going through
+// `prints` would build a string per keystroke.
+extern "putchar" putchar(c: int) -> int
+
 // The wireless chip, which on this board owns the LED as well as the radio. Answers **non-zero on
 // failure**, C-style, rather than truthy on success.
 extern "cyw43_arch_init" cyw43_arch_init() -> int
@@ -87,17 +95,25 @@ wait_for_terminal() =
 // straddle the boundary between one line and the next.
 private var saw_cr: bool = false
 
-// One line of input, without its terminator, as bytes.
+// One line of input, without its terminator, as bytes — **echoed as it is typed**.
 //
-// **This exists because a serial terminal does not agree with a file about what ends a line.** The
-// standard library's line cursor splits on `\n`, which is right for a pipe and wrong for a console:
-// `screen` sends a bare `\r` when Enter is pressed, so a program reading lines that way waits
-// forever and looks broken. Here CR, LF and CRLF all end a line, which is what every serial console
-// has always had to do.
+// **This exists because a serial terminal is not a file and is not a shell.** Two things a hosted
+// program never has to think about are missing here, and each one makes a REPL look broken in a
+// different way:
+//
+// *Line endings.* The standard library's line cursor splits on `\n`, which is right for a pipe and
+// wrong for a console: `screen` sends a bare `\r` when Enter is pressed, so a program reading lines
+// that way waits forever. CR, LF and CRLF all end a line here.
+//
+// *Echo.* A terminal on the other end of a USB CDC port has no line discipline, so nothing appears
+// as it is typed and there is no way to correct a mistake. Nothing is going to do that but this
+// function. Backspace and delete both rub a character out, and Enter echoes CRLF so that what the
+// program prints next starts on a line of its own.
 //
 // The caller supplies the storage, so this needs no allocator and can be used on a target that has
-// none. A line longer than the buffer is cut rather than refused; the answer is how many bytes were
-// taken.
+// none. A line longer than the buffer stops accepting characters rather than overrunning, and stops
+// echoing them too, so what is on screen is what will be returned. The answer is how many bytes
+// were taken.
 read_line(into: []u8) -> usize =
     var n: usize = 0
 
@@ -113,18 +129,34 @@ read_line(into: []u8) -> usize =
             // than waited for: a terminal sending bare CR would never send one, and waiting would
             // hang until the next keystroke.
             saw_cr = true
+            putchar(13)
+            putchar(10)
             return n
         else if b == u8('\n')
             if saw_cr
                 saw_cr = false
             else
+                putchar(13)
+                putchar(10)
                 return n
+        else if b == 8 || b == 127
+            saw_cr = false
+
+            // Rub the character out on the way back: over it with a space, and back again.
+            if n > 0
+                n -= 1
+                putchar(8)
+                putchar(32)
+                putchar(8)
         else
             saw_cr = false
 
-            if n < into.len
+            // Control characters other than the ones handled above would move the cursor about
+            // without being in the line, so they are dropped rather than echoed.
+            if b >= 32 && n < into.len
                 into[n] = b
                 n += 1
+                putchar(int(b))
 
 // Whether the board is running on USB power rather than on its own supply.
 on_usb_power() -> bool = cyw43_arch_gpio_get(vbus_pin)
