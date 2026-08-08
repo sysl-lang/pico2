@@ -1,0 +1,67 @@
+// The Raspberry Pi Pico 2 W, reached through the C SDK that is hosting the program.
+//
+// **This package declares and does not implement.** Every name below is a symbol the pico-sdk
+// already has, so there is no C carried here and nothing for a linker to be pointed at — which is
+// what makes it different in kind from the org's other bindings, and is the one thing to understand
+// before using it. A program importing this must be built by `sysl build-c` and linked into a CMake
+// project that has the SDK. A plain `sysl build` will compile it and then fail to link, naming
+// `sleep_ms`, and the fault will be the build rather than the code.
+//
+// **Nothing here can be tested off the target**, for the same reason. There are no `@test` functions
+// because there is nothing a host could run: every function ends in a call to a board.
+//
+// The signatures were read out of the SDK's own headers rather than remembered — `pico/time.h`,
+// `pico/stdio.h` and `pico/cyw43_arch.h`. That matters more than usual: an `extern` whose signature
+// disagrees with the C declaration links perfectly and corrupts the call at run time, and no part of
+// this arrangement checks one against the other.
+
+module sh.sysl.pico2
+
+// ## What the SDK supplies
+//
+// Bring up whichever stdio the CMake build selected — `pico_enable_stdio_usb` for the USB serial
+// port, `pico_enable_stdio_uart` for the pins. Printing works after this: sysl's `print` reaches
+// `putchar`, which the SDK has already wired to the choice made there.
+extern "stdio_init_all" stdio_init_all() -> bool
+
+// The wireless chip, which on this board owns the LED as well as the radio. Answers **non-zero on
+// failure**, C-style, rather than truthy on success.
+extern "cyw43_arch_init" cyw43_arch_init() -> int
+
+extern "cyw43_arch_deinit" cyw43_arch_deinit()
+
+// One of the CYW43439's own GPIOs — not an RP2350 pin, and not reachable with a GPIO write.
+extern "cyw43_arch_gpio_put" cyw43_arch_gpio_put(wl_gpio: uint, on: bool)
+
+extern "cyw43_arch_gpio_get" cyw43_arch_gpio_get(wl_gpio: uint) -> bool
+
+extern "sleep_ms" sleep_ms(ms: u32)
+
+extern "sleep_us" sleep_us(us: u64)
+
+// ## What the board is
+//
+// `CYW43_WL_GPIO_LED_PIN`, from `boards/pico2_w.h`. **This is a board fact and not a chip fact** —
+// the LED is wired to the wireless chip on a Pico 2 W, and a plain Pico 2 puts it on an ordinary
+// RP2350 pin instead.
+const led_pin: uint = 0
+
+// `CYW43_WL_GPIO_SMPS_PIN` — drives the switched-mode supply into PWM mode, which trades efficiency
+// at low load for less ripple.
+const smps_pin: uint = 1
+
+// `CYW43_WL_GPIO_VBUS_PIN` — reads whether USB power is present.
+const vbus_pin: uint = 2
+
+// ## The shape a program actually wants
+//
+// Bring the board up: stdio first, so that a failure in the second half can be reported. Answers
+// whether the wireless chip started, and a caller that only wants the LED still has to check it.
+init() -> bool =
+    stdio_init_all()
+    cyw43_arch_init() == 0
+
+led(on: bool) = cyw43_arch_gpio_put(led_pin, on)
+
+// Whether the board is running on USB power rather than on its own supply.
+on_usb_power() -> bool = cyw43_arch_gpio_get(vbus_pin)

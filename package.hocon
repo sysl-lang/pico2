@@ -1,0 +1,38 @@
+// The Raspberry Pi Pico 2 W, reached through the C SDK -- a package, in the sense
+// `design/packages.md` gives the word.
+//
+// There is no `dependencies` block because this depends on nothing that resolves: what it needs is
+// the pico-sdk, and the pico-sdk is not a sysl package and could not be one. It is a CMake build
+// system that generates a second-stage bootloader, selects a board header and drives the final link
+// with its own linker script -- none of which fits inside a thing `sysl build` fetches and compiles.
+//
+// So the arrangement is the other way up. **The SDK's CMake owns the link, and a program using this
+// package is built with `sysl build-c` into an archive that CMake then links.** That is the one
+// unusual thing about this package and everything else follows from it.
+//
+// This is the block a *consumer* writes to reach this package, and resolution for it is built
+// (`packages.md` §§ 3-6): a `sysl build` fetches the coordinate, selects by MVS, checks what arrived
+// against `sysl.sum`, and compiles it as more modules.
+//
+//     dependencies {
+//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.1.0" }
+//     }
+//
+// The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
+// tag `v0.1.0` on this repository. The coordinate names the *package*, `pico2`, while the module a
+// program imports is `sh.sysl.pico2`; `packages.md § 9` keeps those two deliberately apart.
+
+package {
+  name    = "pico2"
+  version = "0.1.0"
+}
+
+// **There is deliberately no `requires` block.** This asks for no allocator and no operating system,
+// because a microcontroller has neither -- every name here is a call into C that the SDK's own link
+// satisfies, and a call into C is not a capability.
+//
+// **What it also does not do is carry a `@link` directive**, and the reason is different from every
+// other package in the org. termbox2 has none because its implementation is vendored and compiled
+// here; qcbor names `m` because it reaches `pow`. This one has none because the symbols arrive from
+// a link line that CMake writes and sysl never sees. The absence looks the same and means something
+// else, which is worth knowing when comparing the two.
