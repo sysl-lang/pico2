@@ -15,7 +15,7 @@
 // against `sysl.sum`, and compiles it as more modules.
 //
 //     dependencies {
-//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.4" }
+//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.5" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
@@ -24,7 +24,7 @@
 
 package {
   name    = "pico2"
-  version = "0.0.4"
+  version = "0.0.5"
 }
 
 // **`alloc = true`, and it was not always so.** Until 0.0.3 this package asked for nothing: every

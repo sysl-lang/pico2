@@ -5,7 +5,7 @@ in sysl and hosted by the C SDK.
 
 ```sysl
 import sh.sysl.pico2.*
-import sysl.time.millis
+import sysl.time.DurationUnits
 
 @export("main")
 run() -> int =
@@ -18,9 +18,9 @@ run() -> int =
 
     loop
         led(true)
-        sleep(millis(120))
+        sleep(120.ms)
         led(false)
-        sleep(millis(880))
+        sleep(880.ms)
 ```
 
 That is a whole program. There is no C in it, and no C in the project that builds it: sysl exports
@@ -88,7 +88,7 @@ looks dead rather than early.
 constants — `led_pin`, `smps_pin`, `vbus_pin`.
 
 **Waiting.** `sleep(d: Duration)`. One function where C has two, now that `sysl.time` can name a
-length shorter than a second: `sleep(millis(120))`.
+length shorter than a second, and `sysl.time` writes one number-first: `sleep(120.ms)`.
 
 **Bytes and characters.** `read_byte()`/`write_byte()` and `read_char()`/`write_char()`. Both pairs
 exist because they are different things: a `char` is a Unicode scalar and may take four bytes on the
