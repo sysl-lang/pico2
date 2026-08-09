@@ -22,7 +22,7 @@ module sh.sysl.pico2
 import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
 import sysl.text.str_builder
-import sysl.time.{Duration, millis, whole_micros}
+import sysl.time.{Duration, DurationUnits, whole_micros}
 
 // ## The board
 //
@@ -57,7 +57,7 @@ terminal_connected() -> bool = lib.stdio_usb_connected()
 // Block until a host opens the USB serial port, so that what is printed next is seen.
 wait_for_terminal() =
     while !terminal_connected()
-        sleep(millis(50))
+        sleep(50.ms)
 
 // ## Waiting
 //
@@ -163,14 +163,18 @@ private var saw_cr: bool = false
 // **This exists because a serial terminal is neither a file nor a shell.** Two things a hosted
 // program never thinks about are missing, and each makes a REPL look broken in its own way:
 //
-// *Line endings.* The standard library's line cursor splits on `\n`, which is right for a pipe and
-// wrong for a console: `screen` sends a bare `\r` when Enter is pressed, so a program reading lines
-// that way waits forever. `sysl.io` says so in its own documentation now, and points here. CR, LF and
-// CRLF all end a line.
+// *Echo and editing.* A terminal on the other end of a USB CDC port has no line discipline, so
+// nothing appears as it is typed and there is no way to correct a mistake. Backspace and delete both
+// rub a character out, and Enter echoes CRLF so that what the program prints next starts on a line of
+// its own. **This is the whole of what keeps this function**, and it is why `sysl.io` cannot be used
+// here: the editing happens per byte, between reading one and reading the next, and a line cursor
+// owns the line it is accumulating.
 //
-// *Echo.* A terminal on the other end of a USB CDC port has no line discipline, so nothing appears as
-// it is typed and there is no way to correct a mistake. Backspace and delete both rub a character
-// out, and Enter echoes CRLF so that what the program prints next starts on a line of its own.
+// *Line endings*, which this **no longer has to solve alone**. `screen` sends a bare `\r` when Enter
+// is pressed, and a cursor splitting on `\n` waits forever; that was a gap in `sysl.io` when this was
+// written, and `sysl.io.console_lines` (0.0.35) is the standard answer to it now. CR, LF and CRLF all
+// end a line here too, and the two agree down to the hard case -- a CR ends the line rather than
+// waiting for an LF that a bare-CR terminal never sends, so the debt outlives one call.
 //
 // The line grows as it is typed rather than being bounded by a size the caller had to guess, which is
 // worth an allocator on this board: the SDK links newlib, so there is a heap whether or not this
