@@ -48,6 +48,47 @@ extern "cyw43_arch_gpio_put" cyw43_arch_gpio_put(wl_gpio: uint, on: bool)
 
 extern "cyw43_arch_gpio_get" cyw43_arch_gpio_get(wl_gpio: uint) -> bool
 
+// ### Station mode
+//
+// **These need `pico_cyw43_arch_lwip_*` on the link line, not `pico_cyw43_arch_none`.** The join
+// below waits for `CYW43_LINK_UP`, which `cyw43_tcpip_link_status` reads out of an lwIP `netif` —
+// so with no TCP/IP stack linked there is nothing that can report the link ever coming up. The
+// module beside this one says which variant and why.
+
+extern "cyw43_arch_enable_sta_mode" cyw43_arch_enable_sta_mode()
+
+extern "cyw43_arch_disable_sta_mode" cyw43_arch_disable_sta_mode()
+
+// **Zero on success, and otherwise one of the `CYW43_LINK_*` negatives** — `-1` failed, `-2` no
+// such network, `-3` bad authentication — or `PICO_ERROR_TIMEOUT` (`-1`) when the timeout expires
+// first. That the two share `-1` is C's, and is undone next door.
+//
+// `pw` may be null for an open network, which is `none` on the sysl side.
+extern "cyw43_arch_wifi_connect_timeout_ms" cyw43_arch_wifi_connect_timeout_ms(
+    ssid: *u8, pw: *u8, auth: u32, timeout_ms: u32) -> int
+
+// Starts the join and returns immediately. **Zero means the request was sent**, not that the
+// network was joined.
+extern "cyw43_arch_wifi_connect_async" cyw43_arch_wifi_connect_async(
+    ssid: *u8, pw: *u8, auth: u32) -> int
+
+// ### Access-point mode
+
+extern "cyw43_arch_enable_ap_mode" cyw43_arch_enable_ap_mode(ssid: *u8, pw: *u8, auth: u32)
+
+extern "cyw43_arch_disable_ap_mode" cyw43_arch_disable_ap_mode()
+
+// ### The rest
+//
+// The country the radio is configured for, as `CYW43_COUNTRY(a, b, rev)` packed it: two ASCII
+// letters in the low bytes and a revision above them.
+extern "cyw43_arch_get_country_code" cyw43_arch_get_country_code() -> u32
+
+// Gives the driver a chance to run. **Required only by `pico_cyw43_arch_lwip_poll`**, where
+// nothing else will; under `..._threadsafe_background` it is a no-op, which is what makes it safe
+// to call unconditionally.
+extern "cyw43_arch_poll" cyw43_arch_poll()
+
 // ## C, through newlib
 //
 // The standard module binds this too, for `print`, but keeps it `private[sysl]` — and

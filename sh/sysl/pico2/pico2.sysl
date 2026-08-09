@@ -21,8 +21,8 @@ module sh.sysl.pico2
 
 import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
-import sysl.text.str_builder
-import sysl.time.{Duration, millis, whole_micros}
+import sysl.text.{cstring, str_builder}
+import sysl.time.{Duration, millis, whole_micros, whole_millis}
 
 // ## The board
 //
@@ -77,6 +77,148 @@ led_is_on() -> bool = lib.cyw43_arch_gpio_get(led_pin)
 
 // Whether the board is running on USB power rather than on its own supply.
 on_usb_power() -> bool = lib.cyw43_arch_gpio_get(vbus_pin)
+
+// ## Wi-Fi
+//
+// **A program using any of this must link one of the `pico_cyw43_arch_lwip_*` CMake targets**, not
+// the `pico_cyw43_arch_none` that a blinking LED gets away with. Joining waits for the link to come
+// *up*, and "up" is a question only lwIP can answer — the driver reads it out of a `netif` — so with
+// no TCP/IP stack linked the radio associates and nothing is ever able to say so. There are two:
+//
+// - **`..._lwip_threadsafe_background`** drives the driver from an interrupt, so a program that
+//   blocks somewhere else keeps its connection alive while it waits. A program built around
+//   `read_line` wants this one.
+// - **`..._lwip_poll`** does nothing until `poll` is called, which is cheaper and entirely wrong for
+//   a program that blocks on input.
+//
+// **A DHCP lease is part of joining.** `join` answers when the board has an address rather than when
+// the radio associated, so success here is a usable connection and not a promising start.
+
+// How a network authenticates.
+//
+// The names are the protocol's rather than the SDK's. `CYW43_AUTH_WPA2_AES_PSK` spells out a cipher
+// and a key type as well, and since exactly one of each is on offer per protocol, those extra words
+// distinguish nothing and only make the common case long.
+enum Auth
+    Open
+    Wpa
+    Wpa2
+    WpaWpa2
+    Wpa3
+    Wpa2Wpa3
+
+// `CYW43_AUTH_*` from `cyw43_ll.h`, transcribed the way the pin numbers above are.
+//
+// **Transcribing these is safe where transcribing a struct would not be** (`15 §7`): each is a
+// documented protocol constant that the driver's own API takes as a plain `uint32_t`, so nothing
+// here depends on a layout a compiler chose or on an option somebody else set.
+private auth_code(a: Auth) -> u32 =
+    a match
+        Open -> 0
+        Wpa -> 0x00200002
+        Wpa2 -> 0x00400004
+        WpaWpa2 -> 0x00400006
+        Wpa3 -> 0x01000004
+        Wpa2Wpa3 -> 0x01400004
+
+// Why a join did not happen.
+//
+// **`TimedOut` is also what a network that is not there looks like**, and that is the SDK's doing
+// rather than a simplification made here: it turns "no matching SSID" into another attempt and keeps
+// retrying until the clock runs out, so the outcome never reaches a caller. A wrong SSID and a
+// router that is switched off are the same answer, and no arrangement of this type could separate
+// them.
+//
+// `Refused` carries a code the join never got far enough to interpret — the request itself was
+// rejected before the radio began.
+enum JoinError
+    BadPassword
+    TimedOut
+    Failed
+    Refused(code: int)
+
+// The rendering, so that a failed join can be reported without matching on it.
+impl Display for JoinError
+    display(self, out: *Writer, fmt: FormatSpec)
+        var text = self match
+            BadPassword -> "the password was refused"
+            TimedOut -> "no answer — wrong name, out of range, or switched off"
+            Failed -> "the network refused the connection"
+            Refused(code) -> s"the radio would not start the join (error $code)"
+
+        display_str(text, out, fmt)
+    end display
+
+// Join a network, returning once the board has an address.
+//
+// The station interface is enabled here rather than by a separate call the caller has to remember,
+// because there is nothing else to do with it: every path to a join goes through it.
+join(ssid: string, password: string, auth: Auth, timeout: Duration) -> Result[unit, JoinError] =
+    val name = cstring(ssid)
+    val secret = cstring(password)
+
+    lib.cyw43_arch_enable_sta_mode()
+
+    joined(lib.cyw43_arch_wifi_connect_timeout_ms(
+        name.ptr, secret.ptr, auth_code(auth), u32(whole_millis(timeout))))
+
+// Join a network that has no password.
+//
+// **A null password is how C says this**, and passing an empty string instead does not mean the same
+// thing — so the distinction gets a function rather than an `Option` the caller fills in with `None`
+// nine times out of ten.
+join_open(ssid: string, timeout: Duration) -> Result[unit, JoinError] =
+    val name = cstring(ssid)
+
+    lib.cyw43_arch_enable_sta_mode()
+
+    joined(lib.cyw43_arch_wifi_connect_timeout_ms(
+        name.ptr, null, auth_code(Open), u32(whole_millis(timeout))))
+
+// The SDK's `pico_error_codes`, which are not the `CYW43_LINK_*` values the same function's
+// documentation describes — it translates them on the way out, and `-2` arrives meaning a timeout
+// where `CYW43_LINK_NONET` uses the same number for something else entirely.
+private joined(rc: int) -> Result[unit, JoinError] =
+    if rc == 0 then Ok(())
+    else if rc == -2 then Err(TimedOut)
+    else if rc == -7 then Err(BadPassword)
+    else if rc == -8 then Err(Failed)
+    else Err(Refused(rc))
+
+// Leave the network and shut the station interface down.
+leave() = lib.cyw43_arch_disable_sta_mode()
+
+// Become an access point, so that something else can join *this* board.
+//
+// **Nothing here hands out addresses.** A phone will associate and then wait for a DHCP lease that
+// is not coming, which looks like a network that connects and does not work. Serving one is lwIP's
+// job and this package does not reach that far yet.
+access_point(ssid: string, password: string, auth: Auth) =
+    val name = cstring(ssid)
+    val secret = cstring(password)
+
+    lib.cyw43_arch_enable_ap_mode(name.ptr, secret.ptr, auth_code(auth))
+
+close_access_point() = lib.cyw43_arch_disable_ap_mode()
+
+// The two-letter country the radio is configured for — `XX` when it is the worldwide default.
+//
+// `CYW43_COUNTRY(a, b, rev)` packs two ASCII letters into the low bytes and a revision above them,
+// and the revision is dropped here: it selects a regulatory table and says nothing a caller asking
+// which country would want.
+country() -> string =
+    val packed = lib.cyw43_arch_get_country_code()
+    var out = str_builder()
+
+    out.push_char(char(uint(packed & 0xFF)))
+    out.push_char(char(uint((packed >> 8) & 0xFF)))
+    out.finish()
+
+// Give the driver a chance to run.
+//
+// **Only `..._lwip_poll` needs this**, and under the background variant it does nothing — which is
+// what makes it safe to call from a loop that does not know which one it was linked against.
+poll() = lib.cyw43_arch_poll()
 
 // ## Bytes and characters, in and out
 //
