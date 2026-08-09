@@ -151,8 +151,10 @@ impl Display for JoinError
 
 // Join a network, returning once the board has an address.
 //
-// The station interface is enabled here rather than by a separate call the caller has to remember,
-// because there is nothing else to do with it: every path to a join goes through it.
+// The station interface is enabled here rather than by a separate call the caller has to remember.
+// `scan` enables it too and for the same reason -- the interface is a precondition of using the
+// radio as a station at all, rather than of joining, and this comment used to say "there is nothing
+// else to do with it", which is how `scan` came to be written without it.
 join(ssid: string, password: string, auth: Auth, timeout: Duration) -> Result[unit, JoinError] =
     val name = cstring(ssid)
     val secret = cstring(password)
@@ -253,6 +255,16 @@ struct Network
 // distinguished, because a caller can do the same thing about either.
 scan(patience: Duration) -> []Network =
     var out: Buf[Network] = buf()
+
+    // **The station interface has to be up to scan**, and this is the second path that needs it. It
+    // is enabled here for the reason `join` enables it there -- there is nothing a caller could
+    // usefully do with a separate call except forget it -- and enabling it twice is harmless.
+    //
+    // Leaving this out is not a failure that announces itself: the driver starts a scan that finds
+    // nothing, so a board surrounded by networks reports an empty list. Verified on hardware
+    // 2026-08-09, where `list` on a freshly booted board saw **nothing** and the same command after
+    // a *failed* join -- which enables the interface on its way past -- saw ten networks.
+    lib.cyw43_arch_enable_sta_mode()
 
     if lib.scan_start() != 0 then return out.view()
 
