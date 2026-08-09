@@ -21,7 +21,7 @@ module sh.sysl.pico2
 
 import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
-import sysl.text.{cstring, str_builder}
+import sysl.text.{cstring, from_cstring, str_builder}
 import sysl.time.{Duration, millis, whole_micros, whole_millis}
 
 // ## The board
@@ -219,6 +219,64 @@ country() -> string =
 // **Only `..._lwip_poll` needs this**, and under the background variant it does nothing — which is
 // what makes it safe to call from a loop that does not know which one it was linked against.
 poll() = lib.cyw43_arch_poll()
+
+// ## Scanning
+//
+// **This is the one part of the package with C behind it** — `scan.c`, which says why at length. The
+// short version is that the driver hands its results to a callback running in *its* background
+// context, and a sysl callback there would allocate inside an interrupt.
+
+// One network the radio can see.
+struct Network
+    ssid: string
+    // Signal strength in dBm, so it is negative and closer to zero is stronger. Around -50 is the
+    // same room; below -80 is unlikely to join.
+    rssi: int
+    channel: int
+    // **The driver's own small code, and NOT one of the `Auth` values above.** A scan reports
+    // authentication in a single byte with an encoding of its own, unrelated to the 32-bit
+    // `CYW43_AUTH_*` constants that `join` takes. It is passed through as a number rather than
+    // dressed up as an `Auth` it is not: `0` is an open network and the rest are best left to a
+    // caller that has the driver's source open.
+    auth_code: int
+
+// Every network the radio can hear, strongest sighting of each.
+//
+// **This blocks for up to `patience`.** A scan has no completion callback — the only way to know it
+// has finished is to watch `scan_busy` go false — so this polls at ten hertz and gives up when the
+// budget runs out. Two or three seconds is usually plenty.
+//
+// Duplicates are already gone: an access point answers once per probe, so the raw results hold a
+// dozen copies of every network. Hidden networks are dropped, having no name to list.
+//
+// An empty answer means the scan could not be started or nothing replied — the two are not
+// distinguished, because a caller can do the same thing about either.
+scan(patience: Duration) -> []Network =
+    var out: Buf[Network] = buf()
+
+    if lib.scan_start() != 0 then return out.view()
+
+    // Tenths of the budget, counted down, since there is no clock reading here to compare against.
+    var left = whole_millis(patience) / 100
+
+    while lib.scan_busy() && left > 0
+        sleep(millis(100))
+        left -= 1
+
+    for i in 0..<lib.scan_count()
+        out.push(Network(ssid_at(i), lib.scan_rssi(i), lib.scan_channel(i), lib.scan_auth(i)))
+
+    out.view()
+
+// Whether the last scan saw more networks than it had room for, so that a truncated list is not
+// mistaken for a complete one.
+scan_was_truncated() -> bool = lib.scan_overflowed()
+
+// **An SSID is bytes and not text.** Nothing requires it to be UTF-8, and a network named in some
+// other encoding is a real thing rather than a corruption — so it gets a placeholder that can be
+// printed instead of an error the caller would have to unwrap on every entry.
+private ssid_at(i: int) -> string =
+    from_cstring(lib.scan_ssid(i)).unwrap_or("(a name that is not UTF-8)")
 
 // ## Bytes and characters, in and out
 //

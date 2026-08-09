@@ -89,6 +89,30 @@ extern "cyw43_arch_get_country_code" cyw43_arch_get_country_code() -> u32
 // to call unconditionally.
 extern "cyw43_arch_poll" cyw43_arch_poll()
 
+// ## `scan.c`, beside this package
+//
+// **The only names here that are not the SDK's.** Scanning needs the address of a driver global, an
+// options struct whose size only the header knows, and a callback handed a struct with a layout a
+// compiler chose — so it is done in C and read back a field at a time. `scan.c` says why at length,
+// including why the callback is not written in sysl even though it could be.
+
+extern "sysl_wifi_scan_start" scan_start() -> int
+
+extern "sysl_wifi_scan_busy" scan_busy() -> bool
+
+extern "sysl_wifi_scan_count" scan_count() -> int
+
+extern "sysl_wifi_scan_overflowed" scan_overflowed() -> bool
+
+// NUL-terminated, and valid until the next `scan_start`.
+extern "sysl_wifi_scan_ssid" scan_ssid(i: int) -> *u8
+
+extern "sysl_wifi_scan_rssi" scan_rssi(i: int) -> int
+
+extern "sysl_wifi_scan_channel" scan_channel(i: int) -> int
+
+extern "sysl_wifi_scan_auth" scan_auth(i: int) -> int
+
 // ## C, through newlib
 //
 // The standard module binds this too, for `print`, but keeps it `private[sysl]` — and
