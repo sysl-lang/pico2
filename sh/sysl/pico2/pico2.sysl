@@ -223,16 +223,18 @@ impl Display for Ipv4
 // stack and not one a caller can act on: both mean the radio has associated and there is still
 // nothing to talk from.
 //
-// `Fault` carries the driver's own negative code — `-1` the connection failed, `-2` no such network,
+// `Failed` carries the driver's own negative code — `-1` the connection failed, `-2` no such network,
 // `-3` the password was refused. **`join` reports all three better than this can**, having been there
-// when it happened; they reach here only when something asks after the fact. It is not called
-// `Failed` because `JoinError` already is, and a variant name belongs to its module rather than to
-// its enum.
+// when it happened; they reach here only when something asks after the fact.
+//
+// **`JoinError` above names a `Failed` too, and that is fine**: a variant belongs to its enum rather
+// than to the module, so the two coexist and each use site is settled by the type expected there —
+// the return type below, and the scrutinee in the rendering.
 enum Link
     Down
     NoAddress
     Up
-    Fault(code: int)
+    Failed(code: int)
 
 impl Display for Link
     display(self, out: *Writer, fmt: FormatSpec)
@@ -240,7 +242,7 @@ impl Display for Link
             Down -> "down"
             NoAddress -> "associated, with no address yet"
             Up -> "up"
-            Fault(code) -> s"failed (error $code)"
+            Failed(code) -> s"failed (error $code)"
 
         display_str(text, out, fmt)
     end display
@@ -251,7 +253,7 @@ link() -> Link =
     if rc == 3 then Up
     else if rc == 1 || rc == 2 then NoAddress
     else if rc == 0 then Down
-    else Fault(rc)
+    else Failed(rc)
 
 // The board's own address, once DHCP has handed one over.
 //
