@@ -132,6 +132,23 @@ extern "sysl_wifi_ip4_netmask" ip4_netmask() -> u32
 
 extern "sysl_wifi_ip4_gateway" ip4_gateway() -> u32
 
+// ## `dns.c`, beside this package
+//
+// **Also not the SDK's.** lwIP will only resolve a name through a callback that runs in its own
+// context, so `dns.c` holds the answer and this is the start-poll-read shape the scan already uses.
+// Only one address per name is on offer, and `dns.c` says why.
+
+// **Zero means the answer is already here**, `1` that a query went out, and a negative is lwIP's
+// `err_t` refusing to start.
+extern "sysl_dns_start" dns_start(name: *u8) -> int
+
+extern "sysl_dns_busy" dns_busy() -> bool
+
+extern "sysl_dns_found" dns_found() -> bool
+
+// Packed exactly as the three above are, and meaningless unless `dns_found` is true.
+extern "sysl_dns_address" dns_address() -> u32
+
 // ## C, through newlib
 //
 // The standard module binds this too, for `print`, but keeps it `private[sysl]` — and

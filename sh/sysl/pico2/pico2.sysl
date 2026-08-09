@@ -1,11 +1,15 @@
 // The Raspberry Pi Pico 2 W, as sysl rather than as C.
 //
-// **This package declares and does not implement.** Every name it rests on is a symbol the pico-sdk
-// already has, so no C is carried here and there is nothing for a linker to be pointed at — which is
-// what makes it different in kind from the org's other bindings. A program importing this must be
-// built by `sysl build-c` and linked into a CMake project that has the SDK. A plain `sysl build` will
-// compile it and then fail to link, naming `sleep_us`, and the fault will be the build rather than
-// the code.
+// **Nearly every name it rests on is a symbol the pico-sdk already has**, so most of this package is
+// declaration and there is nothing for a linker to be pointed at — which is what makes it different
+// in kind from the org's other bindings. A program importing this must be built by `sysl build-c` and
+// linked into a CMake project that has the SDK. A plain `sysl build` will compile it and then fail to
+// link, naming `sleep_us`, and the fault will be the build rather than the code.
+//
+// **Three files here are C, and each says at length why it had to be**: `scan.c`, because the driver
+// reports results to a callback in its own background context; `net.c`, because lwIP reaches into a
+// `netif` with macros rather than functions; and `dns.c`, for the same callback reason as the scan.
+// Everything else is a signature.
 //
 // **The C surface is next door in `sh.sysl.pico2.externs`, and this module is written in terms of
 // it.** That is the whole shape: `externs` is faithful to the header, this one is pleasant to use,
@@ -280,6 +284,81 @@ private address(packed: u32) -> Option[Ipv4] =
         u8((packed >> 16) & 0xFF),
         u8((packed >> 8) & 0xFF),
         u8(packed & 0xFF)))
+
+// ## Names
+//
+// **The first thing here that uses the connection rather than describing it.** Everything above
+// answers questions about the radio and the interface; this one sends a packet to a server the DHCP
+// lease named and waits for a reply.
+//
+// It rests on `dns.c` for a reason the two files above did not have: lwIP hands the answer to a
+// callback running in its own interrupt context, so the result is collected in C and read back here.
+
+// Why a name did not resolve.
+//
+// **`NotFound` is also what an unreachable server looks like.** lwIP retries and then reports failure
+// with no address, and the API says nothing about which kind of failure it was — so a name that does
+// not exist and a network with no working DNS server arrive here identically. That is the resolver's
+// doing and not a simplification made here.
+//
+// `TimedOut` is this module's own patience running out, which is rarer than it sounds: lwIP gives up
+// after about five seconds of its own and calls back, so a longer budget than that will almost always
+// see `NotFound` first. It is here for the case where the stack never answers at all.
+//
+// `Refused` means the query never went out — no server configured, or a name lwIP would not accept.
+enum ResolveError
+    NotFound
+    TimedOut
+    Refused(code: int)
+
+impl Display for ResolveError
+    display(self, out: *Writer, fmt: FormatSpec)
+        var text = self match
+            NotFound -> "no such name, or no server that would say"
+            TimedOut -> "the resolver never answered"
+            Refused(code) -> s"the query could not be sent (error $code)"
+
+        display_str(text, out, fmt)
+    end display
+
+// The address a name stands for.
+//
+// **One address, even where a name has several.** Anything a browser would visit answers with a
+// handful of A records, and lwIP keeps the first and discards the rest before this could see them —
+// so this is *an* address for the name rather than *the* address, and asking twice inside the TTL
+// gives the same one from the cache.
+//
+// **A dotted quad resolves to itself** without a packet leaving the board, which makes this safe to
+// call on input that might already be an address.
+//
+// **This blocks for up to `patience`**, polling at ten hertz, for the reason `scan` does: there is
+// nothing to wait on, only a flag the callback sets. A join has to have happened first — with no
+// lease there is no server to ask, and the answer is `Refused`.
+resolve(name: string, patience: Duration) -> Result[Ipv4, ResolveError] =
+    val wanted = cstring(name)
+    val rc = lib.dns_start(wanted.ptr)
+
+    if rc < 0 then return Err(Refused(rc))
+
+    // Tenths of the budget, counted down, since there is no clock reading here to compare against.
+    var left = whole_millis(patience) / 100
+
+    while lib.dns_busy() && left > 0
+        sleep(100.ms)
+        left -= 1
+
+    if !lib.dns_found()
+        if lib.dns_busy() then return Err(TimedOut)
+
+        return Err(NotFound)
+
+    address(lib.dns_address()) match
+        Some(a) -> Ok(a)
+
+        // The resolver said it had an address and the address is `0.0.0.0`, which no name should
+        // stand for. Reporting it as a miss is better than handing back an address that goes nowhere.
+        None -> Err(NotFound)
+end resolve
 
 // Become an access point, so that something else can join *this* board.
 //
