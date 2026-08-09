@@ -113,6 +113,25 @@ extern "sysl_wifi_scan_channel" scan_channel(i: int) -> int
 
 extern "sysl_wifi_scan_auth" scan_auth(i: int) -> int
 
+// ## `net.c`, beside this package
+//
+// **Also not the SDK's.** An address lives in a `struct netif` that is a field of a driver global,
+// and lwIP reads it out with macros rather than functions — so there is nothing here that sysl could
+// declare directly, and `net.c` flattens all of it into numbers.
+
+// `CYW43_LINK_*`: `0` down, `1` associated, `2` associated with no address, `3` up, and negatives for
+// the failures. **`0` is also what a build with no TCP/IP stack answers**, since there is no
+// interface for it to read.
+extern "sysl_wifi_link_status" link_status() -> int
+
+// The four octets packed high to low — `a.b.c.d` as `0xAABBCCDD`, whatever this machine's byte order
+// is. **Zero means the interface has no address**, which is what an unconfigured one reads as.
+extern "sysl_wifi_ip4_address" ip4_address() -> u32
+
+extern "sysl_wifi_ip4_netmask" ip4_netmask() -> u32
+
+extern "sysl_wifi_ip4_gateway" ip4_gateway() -> u32
+
 // ## C, through newlib
 //
 // The standard module binds this too, for `print`, but keeps it `private[sysl]` — and

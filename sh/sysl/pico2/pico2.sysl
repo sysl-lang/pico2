@@ -190,6 +190,95 @@ private joined(rc: int) -> Result[unit, JoinError] =
 // Leave the network and shut the station interface down.
 leave() = lib.cyw43_arch_disable_sta_mode()
 
+// ## Where the board is on the network
+//
+// **The first part of this package that reads lwIP rather than the driver**, and what turns a
+// successful `join` from a claim into a number somebody can ping. It rests on `net.c` for the reason
+// scanning rests on `scan.c`: an address is a field of a `struct netif` that is itself a field of a
+// driver global, and lwIP reaches into it with macros rather than functions, so there is no symbol
+// here for sysl to declare.
+//
+// **A program linked against `pico_cyw43_arch_none` gets `Down` and no address**, always. That is
+// not this package giving up — the interface those answers would come from is not compiled into the
+// driver at all in such a build, and a board with no TCP/IP stack genuinely has nowhere to put an
+// address.
+
+// An IPv4 address, as the four numbers it is written as.
+struct Ipv4
+    a: u8
+    b: u8
+    c: u8
+    d: u8
+
+// So that an address can be printed without taking it apart.
+impl Display for Ipv4
+    display(self, out: *Writer, fmt: FormatSpec)
+        display_str(s"${self.a}.${self.b}.${self.c}.${self.d}", out, fmt)
+    end display
+
+// How far along the station connection is.
+//
+// **`NoAddress` covers two of the driver's states** — `CYW43_LINK_JOIN` and `CYW43_LINK_NOIP` — which
+// differ over whether lwIP has finished bringing the interface up. That is a distinction inside the
+// stack and not one a caller can act on: both mean the radio has associated and there is still
+// nothing to talk from.
+//
+// `Fault` carries the driver's own negative code — `-1` the connection failed, `-2` no such network,
+// `-3` the password was refused. **`join` reports all three better than this can**, having been there
+// when it happened; they reach here only when something asks after the fact. It is not called
+// `Failed` because `JoinError` already is, and a variant name belongs to its module rather than to
+// its enum.
+enum Link
+    Down
+    NoAddress
+    Up
+    Fault(code: int)
+
+impl Display for Link
+    display(self, out: *Writer, fmt: FormatSpec)
+        var text = self match
+            Down -> "down"
+            NoAddress -> "associated, with no address yet"
+            Up -> "up"
+            Fault(code) -> s"failed (error $code)"
+
+        display_str(text, out, fmt)
+    end display
+
+link() -> Link =
+    val rc = lib.link_status()
+
+    if rc == 3 then Up
+    else if rc == 1 || rc == 2 then NoAddress
+    else if rc == 0 then Down
+    else Fault(rc)
+
+// The board's own address, once DHCP has handed one over.
+//
+// **`None` is also what a board that never joined says**, and `link` is what tells the two apart:
+// `NoAddress` is a lease still coming, `Down` is nothing to have leased it.
+ip() -> Option[Ipv4] = address(lib.ip4_address())
+
+// The netmask that came with the address.
+netmask() -> Option[Ipv4] = address(lib.ip4_netmask())
+
+// The router that everything not on this network goes through.
+gateway() -> Option[Ipv4] = address(lib.ip4_gateway())
+
+// **The octets arrive packed high to low**, `a.b.c.d` as `0xAABBCCDD`, because lwIP stores an address
+// in network byte order and `net.c` is where that stops being a question.
+//
+// Zero is how an interface with no address reads, and there is no host it could be naming, so it
+// becomes `None` rather than a printable `0.0.0.0` that a caller would have to know to distrust.
+private address(packed: u32) -> Option[Ipv4] =
+    if packed == 0 then return None
+
+    Some(Ipv4(
+        u8((packed >> 24) & 0xFF),
+        u8((packed >> 16) & 0xFF),
+        u8((packed >> 8) & 0xFF),
+        u8(packed & 0xFF)))
+
 // Become an access point, so that something else can join *this* board.
 //
 // **Nothing here hands out addresses.** A phone will associate and then wait for a DHCP lease that
