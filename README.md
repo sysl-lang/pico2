@@ -28,15 +28,45 @@ That is a whole program. There is no C in it, and no C in the project that build
 
 ```hocon
 dependencies {
-  pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.4" }
+  pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.6" }
 }
 ```
 
+## The radio
+
+The Wi-Fi surface is the larger half of this package. A program can join a network, scan for the ones
+within earshot, read the address DHCP handed over, resolve a name, and fetch a document over http or
+https:
+
+```sysl
+join("network", "password", Wpa2, 20.s) match
+    Ok(_) ->
+        ip() match
+            Some(a) -> print(s"the board is $a")
+            None -> ()
+
+        fetch("https://api.ipify.org", 20.s) match
+            Ok(r) -> print(s"the world sees ${r.body}")
+            Err(e) -> print(s"could not fetch — $e")
+
+    Err(e) -> print(s"could not join — $e")
+```
+
+**The https half needs the CMake project to have linked mbedtls**, which is the one place this
+package's requirements reach past the SDK's Wi-Fi support. Without it `fetch` answers `Unsupported`
+and a program that does not want TLS pays nothing for it. The certificate authorities are compiled
+into this package, and there are deliberately only two — a host whose chain ends elsewhere is refused.
+
 ## What this package is, and what it is not
 
-**It declares and does not implement.** Every name in it is a symbol the pico-sdk already has, so no
-C is carried here and there is nothing for a linker to be pointed at. That makes it different in kind
-from the org's other bindings, which vendor a library and compile it.
+**It is nearly all declaration.** Most names in it are symbols the pico-sdk already has, so there is
+little for a linker to be pointed at, which makes it different in kind from the org's other bindings.
+
+**Four files are C, and each is a case the SDK cannot be reached from sysl directly.** `scan.c`,
+because the driver reports results to a callback in its own background context; `net.c`, because lwIP
+reads an address out of a `netif` with macros rather than functions; `dns.c` and `http.c`, for the
+same callback reason as the scan. Each says at length why, and they are worth reading before adding a
+fifth.
 
 The consequence to understand before using it: **a program importing `pico2` must be built with
 `sysl build-c` and linked by a CMake project that has the SDK.** A plain `sysl build` will compile it
@@ -187,9 +217,17 @@ that is currently the whole of the assurance. A generated translation unit takin
 function at the declared signature, compiled against the real headers, would turn a mismatch into a
 compile error; it is not built.
 
-**No registers, no Wi-Fi, no `static inline`.** Much of the SDK's hardware API is `static inline` —
-45 functions in `hardware/gpio.h` alone — so it has no symbol to declare and would need a C shim.
+**No registers, and no `static inline`.** Much of the SDK's hardware API is `static inline` — 45
+functions in `hardware/gpio.h` alone — so it has no symbol to declare and would need a C shim.
 Reaching the RP2350's registers directly is a different package and does not need the SDK at all.
+
+**Nothing that listens.** The radio can be an access point, but nothing here hands out addresses or
+accepts a connection: a phone will associate and then wait for a DHCP lease that is not coming. The
+fetch is a client and there is no server side.
+
+**No clock, so no certificate expiry check.** A TLS chain is verified in full — a forged certificate
+is refused — but a genuine expired one is not caught, because the board does not know what day it is.
+SNTP would fix it and is not built.
 
 ## Licence
 
