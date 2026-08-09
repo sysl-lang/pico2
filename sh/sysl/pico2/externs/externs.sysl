@@ -149,6 +149,33 @@ extern "sysl_dns_found" dns_found() -> bool
 // Packed exactly as the three above are, and meaningless unless `dns_found` is true.
 extern "sysl_dns_address" dns_address() -> u32
 
+// ## `http.c`, beside this package
+//
+// **Also not the SDK's.** lwIP's HTTP client reports a body through a callback handed a `pbuf` chain
+// that has to be walked and released in lwIP's own context, and the TLS side needs three things
+// neither library supplies — `psa_crypto_init`, a millisecond clock, and the server name for SNI.
+// `http.c` says why at length.
+
+// **Zero means the request started.** A negative is lwIP's `err_t`, or `-100` a request already in
+// flight, `-101` the crypto library would not start, `-102` the built-in certificates would not
+// parse, `-103` a build with no HTTP client in it.
+extern "sysl_http_start" http_start(host: *u8, port: u16, uri: *u8, secure: bool) -> int
+
+extern "sysl_http_busy" http_busy() -> bool
+
+// `httpc_result_t`: `0` succeeded, `2` could not connect, `3` could not resolve, `4` the server hung
+// up, `5` timed out, `6` the server refused, `7` out of memory, `9` the length did not match.
+extern "sysl_http_outcome" http_outcome() -> int
+
+extern "sysl_http_status" http_status() -> u32
+
+extern "sysl_http_body_len" http_body_len() -> u32
+
+extern "sysl_http_truncated" http_truncated() -> bool
+
+// NUL-terminated, and valid until the next `http_start`.
+extern "sysl_http_body" http_body() -> *u8
+
 // ## C, through newlib
 //
 // The standard module binds this too, for `print`, but keeps it `private[sysl]` — and

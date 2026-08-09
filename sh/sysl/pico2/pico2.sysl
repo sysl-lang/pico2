@@ -6,10 +6,14 @@
 // linked into a CMake project that has the SDK. A plain `sysl build` will compile it and then fail to
 // link, naming `sleep_us`, and the fault will be the build rather than the code.
 //
-// **Three files here are C, and each says at length why it had to be**: `scan.c`, because the driver
+// **Four files here are C, and each says at length why it had to be**: `scan.c`, because the driver
 // reports results to a callback in its own background context; `net.c`, because lwIP reaches into a
-// `netif` with macros rather than functions; and `dns.c`, for the same callback reason as the scan.
-// Everything else is a signature.
+// `netif` with macros rather than functions; and `dns.c` and `http.c`, for the same callback reason
+// as the scan. Everything else is a signature.
+//
+// **`http.c` also needs the CMake project to have linked mbedtls**, which is the one place this
+// package's requirements reach past the SDK's Wi-Fi support. Without it the file compiles to
+// refusals and `fetch` answers `Unsupported`, so a program that does not want TLS pays nothing.
 //
 // **The C surface is next door in `sh.sysl.pico2.externs`, and this module is written in terms of
 // it.** That is the whole shape: `externs` is faithful to the header, this one is pleasant to use,
@@ -25,7 +29,7 @@ module sh.sysl.pico2
 
 import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
-import sysl.text.{cstring, from_cstring, str_builder}
+import sysl.text.{Search, cstring, from_cstring, parse_int, str_builder}
 import sysl.time.{Duration, DurationUnits, whole_micros, whole_millis}
 
 // ## The board
@@ -359,6 +363,171 @@ resolve(name: string, patience: Duration) -> Result[Ipv4, ResolveError] =
         // stand for. Reporting it as a miss is better than handing back an address that goes nowhere.
         None -> Err(NotFound)
 end resolve
+
+// ## Fetching a document
+//
+// **This is the connection being used for something, rather than described or probed.** It rests on
+// `http.c`, which puts lwIP's own HTTP client behind a start-poll-read surface — and on mbedtls,
+// linked in by the CMake project rather than by anything here, for the `https` half.
+//
+// **One request at a time.** The body and the host name are single pieces of storage in the shim, so
+// a second `fetch` while one is in flight is refused rather than allowed to overwrite the first.
+
+// What came back.
+//
+// **`status` is a separate question from whether the fetch worked**: a `404` that arrives whole is a
+// successful fetch of an error page, and is reported as `Ok` with a status of 404. A caller that
+// cares looks at the number.
+struct Response
+    status: u32
+    body: string
+    // Whether the body was longer than there was room for. A short answer that reads as the whole
+    // document is the one outcome worth ruling out.
+    truncated: bool
+
+// Why a fetch did not happen.
+//
+// **`Untrusted` is the one worth reading twice.** The board carries two certificate authorities and
+// nothing else, so a perfectly good server whose chain ends anywhere else is refused. That is the
+// design working rather than failing — with verification required, a name this board cannot check is
+// a name it will not talk to.
+//
+// **A refused certificate is not distinguished from any other failure to connect**, because lwIP's
+// client reports both as one code. `Untrusted` and `Unreachable` are therefore the same answer
+// wearing two names, and only one of them is produced; the enum keeps both so that a future client
+// that can tell them apart does not change this type.
+enum FetchError
+    BadUrl
+    Busy
+    Unsupported
+    Unresolved
+    Unreachable
+    Untrusted
+    Closed
+    TimedOut
+    OutOfMemory
+    Refused(code: int)
+
+impl Display for FetchError
+    display(self, out: *Writer, fmt: FormatSpec)
+        var text = self match
+            BadUrl -> "that is not an http or https URL"
+            Busy -> "a fetch is already running"
+            Unsupported -> "this build has no http client in it"
+            Unresolved -> "the host name could not be resolved"
+            Unreachable -> "could not connect — unreachable, or a certificate this board does not trust"
+            Untrusted -> "the certificate was not signed by an authority this board carries"
+            Closed -> "the server closed the connection early"
+            TimedOut -> "the server did not answer in time"
+            OutOfMemory -> "not enough memory for the transfer"
+            Refused(code) -> s"the request could not be sent (error $code)"
+
+        display_str(text, out, fmt)
+    end display
+
+// Fetch a document over http or https.
+//
+// **The scheme is the only difference, and it costs one field.** lwIP's client opens its connection
+// through an allocator; given none it speaks plain TCP, and given the TLS one it speaks https. So
+// both come out of one binary and one path through this function.
+//
+// **This blocks for up to `patience`**, polling at ten hertz, as `scan` and `resolve` do. A TLS
+// handshake on this board takes a second or two, so a budget under about five seconds will report a
+// working server as slow.
+//
+// A join has to have happened first: with no lease there is no name resolution and the answer is
+// `Unresolved`.
+fetch(url: string, patience: Duration) -> Result[Response, FetchError] =
+    val taken = split_url(url)
+
+    if taken.is_none() then return Err(BadUrl)
+
+    val parts = taken.unwrap()
+    val host = cstring(parts.host)
+    val path = cstring(parts.path)
+    val rc = lib.http_start(host.ptr, parts.port, path.ptr, parts.secure)
+
+    if rc == -100 then return Err(Busy)
+    if rc == -103 then return Err(Unsupported)
+    if rc < 0 then return Err(Refused(rc))
+
+    // Tenths of the budget, counted down, since there is no clock reading here to compare against.
+    var left = whole_millis(patience) / 100
+
+    while lib.http_busy() && left > 0
+        sleep(100.ms)
+        left -= 1
+
+    if lib.http_busy() then return Err(TimedOut)
+
+    val outcome = lib.http_outcome()
+
+    if outcome != 0 then return Err(failure(outcome))
+
+    Ok(Response(
+        lib.http_status(),
+        from_cstring(lib.http_body()).unwrap_or("(a body that is not UTF-8)"),
+        lib.http_truncated()))
+end fetch
+
+// `httpc_result_t` as something a caller can match on.
+private failure(code: int) -> FetchError =
+    if code == 2 then Unreachable
+    else if code == 3 then Unresolved
+    else if code == 4 then Closed
+    else if code == 5 then TimedOut
+    else if code == 7 then OutOfMemory
+    else Refused(code)
+
+// A URL taken apart far enough to ask for it.
+private struct Url
+    host: string
+    port: u16
+    path: string
+    secure: bool
+
+// **Only `http` and `https` with a host, and that is the whole grammar.** No credentials, no
+// fragment, and a query string is simply part of the path — which is what the wire wants anyway,
+// since the request line carries everything after the host verbatim.
+private split_url(url: string) -> Option[Url] =
+    var secure = true
+    var rest = ""
+
+    if url.starts_with("https://")
+        rest = url[8..]
+    else if url.starts_with("http://")
+        secure = false
+        rest = url[7..]
+    else
+        return None
+
+    // Everything to the first slash names the host; what follows is asked for as it stands. A URL
+    // with no path at all is asking for the root.
+    val cut = rest.index_of("/")
+    val authority = cut match
+        Some(at) -> rest[..<at]
+        None -> rest
+
+    val path = cut match
+        Some(at) -> rest[at..]
+        None -> "/"
+
+    if authority.is_empty() then return None
+
+    // A port after a colon, and the scheme's own when there is none.
+    authority.index_of(":") match
+        None -> Some(Url(authority, if secure then 443 else 80, path, secure))
+
+        Some(at) ->
+            val digits = authority[at + 1..]
+            val host = authority[..<at]
+
+            if host.is_empty() then return None
+
+            parse_int(digits) match
+                Ok(n) if n > 0 && n <= 65535 -> Some(Url(host, u16(n), path, secure))
+                _ -> None
+end split_url
 
 // Become an access point, so that something else can join *this* board.
 //
