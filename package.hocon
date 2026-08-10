@@ -19,22 +19,24 @@
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.0.6` on this repository. The coordinate names the *package*, `pico2`, while the module a
+// tag `v0.0.7` on this repository. The coordinate names the *package*, `pico2`, while the module a
 // program imports is `sh.sysl.pico2`; `packages.md § 9` keeps those two deliberately apart.
 
 package {
   name    = "pico2"
-  version = "0.0.6"
+  version = "0.0.7"
 }
 
 // **`alloc = true`, and it was not always so.** Until 0.0.3 this package asked for nothing: every
 // name here is a call into C that the SDK's own link satisfies, and a call into C is not a
 // capability.
 //
-// What changed is `read_line`, which answers a `string` that grows as the line is typed rather than
-// filling a buffer the caller had to size in advance. **That is a deliberate trade and not a slip.**
-// The SDK links newlib, so this board has a heap whether or not this package touches one, and
-// refusing to use it bought an API every caller had to work around. A target with genuinely no
+// What changed was `read_line`, which answered a `string` that grew as the line was typed rather than
+// filling a buffer the caller had to size in advance. That editor now lives in `sysl.term.edit` and
+// this package supplies the port it reads through — but the requirement stays, because the editor
+// allocates and a program here reaches it. **It is a deliberate trade and not a slip.** The SDK links
+// newlib, so this board has a heap whether or not this package touches one, and refusing to use it
+// bought an API every caller had to work around. A target with genuinely no
 // allocator wants different code -- and would want a different package anyway, since this one *is*
 // the SDK's board and the SDK is what brings the heap.
 //
