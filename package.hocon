@@ -15,7 +15,7 @@
 // against `sysl.sum`, and compiles it as more modules.
 //
 //     dependencies {
-//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.6" }
+//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.7" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
