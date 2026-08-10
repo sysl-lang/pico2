@@ -126,39 +126,50 @@ wire, while echoing a half-typed line wants bytes, since a byte pulled out of on
 yet. `read_char` decodes UTF-8 and answers **U+FFFD** for malformed input, so one bad byte cannot end
 a session; `None` means the input ended.
 
-**A line of text.** `read_line() -> string`, echoed as it is typed. It cannot fail: the line is held
-as characters, and a malformed byte became U+FFFD on the way in.
+**A line of text.** `sysl.term.edit` does this now, and `read_line` is gone. `console_in()` and
+`console_out()` are the port as a `Reader` and a `Writer`, which is all an editor asks for.
 
-## `read_line` is a line editor, and here is why it has to be
+## The editor moved into the standard library
 
-A serial terminal is neither a file nor a shell, and both gaps make a REPL look broken rather than
-wrong.
+`read_line` was a full line editor living in this package — some two hundred lines of insertion,
+backspace, delete, arrow keys, Home and End, `Ctrl-A/E/B/F/U/K`, and the redraw arithmetic under all
+of it. It was here for one reason: a USB CDC port has no line discipline, so nothing appears as it is
+typed and a mistake cannot be corrected, and nothing in the standard library would supply one.
 
-**Line endings.** `sysl.io`'s line cursor splits on `\n`, which is right for a pipe. `screen` sends a
-bare `\r` when Enter is pressed, so a program reading lines that way waits forever and prints
-nothing. CR, LF and CRLF all end a line here.
+`sysl.term.edit` supplies one now, over a `*Reader` and a `*Writer`, so a program on this board and a
+program at a desktop terminal are the same program:
 
-**Echo and editing.** A USB CDC port has no line discipline, so nothing appears as it is typed and a
-mistake cannot be corrected. Nothing else was going to do it:
+```sysl
+import sh.sysl.pico2.{init, wait_for_terminal, console_in, console_out}
+import sysl.term.edit.editor
 
-| | |
-|---|---|
-| `←` `→` | move within the line |
-| `Home` `End` | and `Ctrl-A` / `Ctrl-E` |
-| `Backspace` `Delete` | at the cursor, not only at the end |
-| `Ctrl-U` `Ctrl-K` | kill the line, or from the cursor on |
-| `Ctrl-B` `Ctrl-F` | left and right, for readline hands |
+var input = console_in()
+var output = console_out()
+var ed = editor(&input, &output)
 
-The line is a **`Buf[char]`**, so the cursor is an index into it and moving is `at - 1` and `at + 1`.
-It was held as bytes until sysl 0.0.33, because there was no way to turn characters back into a
-`string` — that cost about sixty lines of walking UTF-8 boundaries by hand, spread through `left`,
-`right`, `backspace` and `delete_at`. `encode_utf8` closed the gap, `StrBuilder.push_char` goes
-through it, and all of that walking is gone. A half character can no longer be left behind by a
-backspace, because a half character never enters the line.
+for line in ed
+    print("you typed", line)
+```
 
-**Still assumed: one character, one column.** A wide character — CJK, most emoji — takes two, so
-erasing one would leave half behind. Fixing that means asking `sysl.text.columns` for a width and
-counting columns.
+**Three things came back that could not be had here**, and each was a real defect rather than a
+missing nicety:
+
+- **Columns, not characters.** This package assumed one character was one column, so erasing a CJK
+  character or an emoji left half of it on the screen. The library asks `sysl.text.char_columns`.
+- **Both spellings of an arrow key.** This read only `ESC [ …`; a terminal in application cursor key
+  mode sends `ESC O …`, and those arrived as stray letters in the line.
+- **Tests.** Wired straight to `stdio_getchar`, the editor could be exercised only by a person typing
+  at a cable — which is why the section below used to call the absence of tests this package's real
+  weakness. Over a `Reader` it is ordinary code, and the redraw arithmetic is checked by the
+  compiler's own suite against a byte script.
+
+What stays here is what only a board can do: `read_byte`, `write_byte`, `read_char`, `write_char`,
+and the two stream types over them. **Neither needs flushing**, which is the one place a board is
+simpler than a host — the SDK's `putchar` puts bytes on the wire rather than into a buffer, so what
+the editor echoes appears as it is typed. `sysl.term.tty.tty_writer` exists because a hosted C
+library does not behave that way.
+
+**Needs sysl 0.0.38 or newer**, which is where `sysl.term.edit` ships.
 
 ## Using it
 
@@ -204,11 +215,17 @@ is documented here as a *board* fact rather than a chip one.
 
 ## What is not here
 
-**No tests.** Every function ends in a call to a board, so there is nothing a host could run and
-`sysl test .` would have nothing to report. This is the package's real weakness rather than an
-oversight: the UTF-8 boundary walking and the redraw arithmetic are exactly the code that should be
-tested, and the only thing stopping it is that the editor is wired directly to `stdio_getchar`.
-Parameterising it over a byte source would fix that, and is a design change rather than a chore.
+**No tests, and it matters much less than it did.** Every function here ends in a call to a board, so
+there is nothing a host could run and `sysl test .` would have nothing to report.
+
+This used to be the package's real weakness, and the reason was named precisely: the UTF-8 boundary
+walking and the redraw arithmetic were exactly the code that should be tested, and the only thing
+stopping it was that the editor was wired directly to `stdio_getchar`. Parameterising it over a byte
+source was called a design change rather than a chore — which is what happened, one directory over.
+That editor is `sysl.term.edit` now, and the compiler's own suite runs it against a byte script.
+
+What is left untested is what was always untestable off a board — a `sleep_ms`, a `gpio_put`, a scan
+of the radio — and no amount of parameterising reaches it.
 
 **No checking of the declarations against the SDK.** An `extern` whose signature disagrees with the C
 one links perfectly and corrupts the call at run time. The signatures here were read out of

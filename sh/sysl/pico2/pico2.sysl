@@ -29,6 +29,7 @@ module sh.sysl.pico2
 
 import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
+import sysl.io.Reader
 import sysl.text.{Search, cstring, from_cstring, parse_int, str_builder}
 import sysl.time.{Duration, DurationUnits, whole_micros, whole_millis}
 
@@ -656,6 +657,67 @@ write_byte(b: u8) = lib.putchar(int(b))
 // The encoding is `sysl.printc`'s, which ends at the same `putchar` this module declares.
 write_char(c: char) = printc(c)
 
+// ## The port as a `Reader` and a `Writer`
+//
+// **This is the whole of what the package supplies to a line editor, and it used to supply the editor
+// as well.** `read_line` lived here — some two hundred lines of insertion, backspace, arrow keys and
+// redraw arithmetic — because `sysl.io` had no answer for a terminal with no line discipline. It has
+// one now: `sysl.term.edit`, which is the same editor over a `*Reader` and a `*Writer`, so a board and
+// a desktop run the same code and only these two types differ.
+//
+// The other thing that changed is that the editor can be **tested**. Wired straight to
+// `stdio_getchar`, it could only be exercised by a person typing at a serial cable, which is why the
+// package README called the absence of tests its real weakness. Over a `Reader` it is ordinary code,
+// and the redraw arithmetic — the part most worth checking and least visible — is now checked by the
+// compiler's own suite.
+//
+// **Two types rather than one implementing both**, so an editor is handed two distinct borrows rather
+// than two mutable borrows of one value. Neither carries state: the port is the board's, not the
+// value's, so both are empty structs exactly as `sysl.io`'s `Stdout` and `Stderr` are.
+
+// The USB serial port, read a byte at a time.
+//
+// **One byte per read is honest rather than lazy.** `stdio_getchar` blocks until a byte arrives and
+// cannot say how many are waiting, so filling more of the caller's slice would mean waiting for input
+// that may never be typed. A cursor over this refills as often as it must, which is what its own
+// buffer is for.
+struct ConsoleIn
+end ConsoleIn
+
+impl Fallible for ConsoleIn
+
+impl Reader for ConsoleIn
+    read(*self, into: []u8) -> []const u8
+        if into.len == 0 then return into
+
+        read_byte() match
+            None -> into[0..<0]
+
+            Some(b) ->
+                into[0] = b
+                into[0..<1]
+    end read
+end ConsoleIn
+
+// The same port, written to.
+//
+// It needs no flushing, which is the one place a board is simpler than a host: the SDK's `putchar`
+// puts bytes on the wire rather than into a buffer, so what an editor echoes appears as it is typed
+// without anybody asking. `sysl.term.tty.tty_writer` exists because a hosted C library does not.
+struct ConsoleOut
+end ConsoleOut
+
+impl Fallible for ConsoleOut
+
+impl Writer for ConsoleOut
+    write(*self, bytes: []const u8)
+        for b in bytes do write_byte(b)
+end ConsoleOut
+
+console_in() -> ConsoleIn = ConsoleIn()
+
+console_out() -> ConsoleOut = ConsoleOut()
+
 // One character, decoded from however many bytes it took — the other half of `write_char`, and the
 // one a program reading text wants.
 //
@@ -699,283 +761,32 @@ read_char() -> Option[char] =
             Some(char(cp))
 end read_char
 
-// ## A line of input
-
 // U+FFFD, what a decoder answers for input it cannot make sense of.
 private const replacement: char = '\u{FFFD}'
 
-// Whether the last line ended with a CR, so that the LF of a CRLF is swallowed rather than read as an
-// empty line following it. It has to outlive one `read_line`, because the two bytes of a CRLF
-// straddle the boundary between one line and the next.
-private var saw_cr: bool = false
-
-// One line of input, without its terminator — **echoed as it is typed**.
+// ## Reading a line — which is `sysl.term.edit`'s job now, and used to be this file's
 //
-// **This exists because a serial terminal is neither a file nor a shell.** Two things a hosted
-// program never thinks about are missing, and each makes a REPL look broken in its own way:
+// **`read_line` is gone, and about two hundred lines with it.** It was a full line editor —
+// insertion, backspace, delete, arrow keys, Home and End, Ctrl-A/E/B/F/U/K and the redraw arithmetic
+// under all of it — and it lived here for one reason: a USB CDC port has no line discipline, and
+// nothing in the standard library would supply one.
 //
-// *Echo and editing.* A terminal on the other end of a USB CDC port has no line discipline, so
-// nothing appears as it is typed and there is no way to correct a mistake. Backspace and delete both
-// rub a character out, and Enter echoes CRLF so that what the program prints next starts on a line of
-// its own. **This is the whole of what keeps this function**, and it is why `sysl.io` cannot be used
-// here: the editing happens per byte, between reading one and reading the next, and a line cursor
-// owns the line it is accumulating.
+// `sysl.term.edit` is that editor, over a `*Reader` and a `*Writer`. A program on this board now
+// writes what a program at a desktop terminal writes, and the two differ only in where the bytes
+// come from:
 //
-// *Line endings*, which this **no longer has to solve alone**. `screen` sends a bare `\r` when Enter
-// is pressed, and a cursor splitting on `\n` waits forever; that was a gap in `sysl.io` when this was
-// written, and `sysl.io.console_lines` (0.0.35) is the standard answer to it now. CR, LF and CRLF all
-// end a line here too, and the two agree down to the hard case -- a CR ends the line rather than
-// waiting for an LF that a bare-CR terminal never sends, so the debt outlives one call.
+//     import sysl.term.edit.editor
 //
-// The line grows as it is typed rather than being bounded by a size the caller had to guess, which is
-// worth an allocator on this board: the SDK links newlib, so there is a heap whether or not this
-// package uses one.
+//     var input = console_in()
+//     var output = console_out()
+//     var ed = editor(&input, &output)
 //
-// **It answers a `string` and cannot fail**, which it could not do while the line was held as bytes.
-// A `Buf[char]` is valid text by construction — every element came out of `read_char`, which is where
-// a malformed byte already became U+FFFD — so there is nothing left to validate at the end and no
-// `Result` for the caller to unwrap.
-read_line() -> string =
-    var line: Buf[char] = buf()
-    var at: usize = 0
-
-    loop
-        read_byte() match
-            None -> return finish(&line)
-
-            Some(b) ->
-                if b == u8('\r')
-                    // CR ends the line. Whether an LF follows is not known yet, so it is remembered
-                    // rather than waited for: a terminal sending bare CR would never send one, and
-                    // waiting would hang until the next keystroke.
-                    saw_cr = true
-                    at = to_end(&line, at)
-                    new_line()
-                    return finish(&line)
-                else if b == u8('\n')
-                    if saw_cr
-                        saw_cr = false
-                    else
-                        at = to_end(&line, at)
-                        new_line()
-                        return finish(&line)
-                else
-                    saw_cr = false
-                    at = edit(&line, at, b)
-end read_line
-
-// The characters gathered back into a `string`, which is one `StrBuilder` and no validation.
-private finish(line: *Buf[char]) -> string =
-    var out = str_builder()
-
-    for c in line.view()
-        out.push_char(c)
-
-    out.finish()
-
-// One keystroke's worth of editing, answering where the cursor ended up.
+//     for line in ed
+//         ...
 //
-// Split out because `read_line` above is about *when a line ends*, and this is about what the line
-// says — two questions that were one function until arrow keys arrived, at which point the function
-// stopped fitting on a screen twice over.
-//
-// A byte that begins a character is read the rest of the way here rather than in `read_line`, so
-// that what goes into the line is always a whole character.
-private edit(line: *Buf[char], at: usize, b: u8) -> usize =
-    if b == 27
-        escape(line, at)
-    else if b == 8 || b == 127
-        backspace(line, at)
-    else if b == 1
-        to_start(line, at)                  // Ctrl-A
-    else if b == 5
-        to_end(line, at)                    // Ctrl-E
-    else if b == 2
-        left(line, at)                      // Ctrl-B
-    else if b == 6
-        right(line, at)                     // Ctrl-F
-    else if b == 21
-        kill_line(line, at)                 // Ctrl-U
-    else if b == 11
-        kill_to_end(line, at)               // Ctrl-K
-    else if b >= 32
-        insert(line, at, from_byte(b))
-    else
-        // Any other control character would move the terminal's cursor without being in the line.
-        at
-end edit
-
-// The character a byte begins, read the rest of the way off the port.
-//
-// It is `read_char`'s decode with the lead byte already in hand, which is the shape a line editor
-// needs: the loop above has to look at every byte to find the control keys, so by the time it knows
-// the byte is ordinary text it has already taken it.
-private from_byte(b0: u8) -> char =
-    if b0 < 128 then return char(uint(b0))
-
-    var more = 0
-
-    if b0 & 224 == 192 then more = 1
-    else if b0 & 240 == 224 then more = 2
-    else if b0 & 248 == 240 then more = 3
-
-    // A continuation byte arriving where a leading byte belongs.
-    if more == 0 then return replacement
-
-    val mask = if more == 1 then 31 else if more == 2 then 15 else 7
-    var cp = uint(b0 & u8(mask))
-    var n = 0
-
-    while n < more
-        read_byte() match
-            None -> return replacement
-
-            Some(b) ->
-                if b & 192 != 128 then return replacement
-
-                cp = (cp << 6) | uint(b & 63)
-                n += 1
-
-    char(cp)
-end from_byte
-
-// An escape sequence, of which only `ESC [ …` is understood.
-//
-// **The bytes of a sequence arrive together**, so reading them with the same blocking call the rest
-// of the loop uses is safe in practice. A lone Escape key is the exception: it waits for the next
-// keystroke before deciding, which is what every terminal program does and for the same reason.
-private escape(line: *Buf[char], at: usize) -> usize =
-    read_byte() match
-        None -> at
-
-        Some(bracket) ->
-            if bracket != u8('[') then return at
-
-            read_byte() match
-                None -> at
-
-                Some(c) ->
-                    if c == u8('D') then left(line, at)
-                    else if c == u8('C') then right(line, at)
-                    else if c == u8('H') then to_start(line, at)
-                    else if c == u8('F') then to_end(line, at)
-                    else if c == u8('3')
-                        // Delete arrives as `ESC [ 3 ~`, so the tilde has to be taken as well.
-                        read_byte()
-                        delete_at(line, at)
-                    else
-                        // Up, down, and everything else with a longer form: swallowed rather than
-                        // echoed, since echoing it would move the cursor off the line.
-                        at
-end escape
-
-// ### Moving
-//
-// The cursor is moved by writing rather than by an escape sequence: a backspace goes left one, and
-// re-echoing the character under the cursor goes right one. That needs no number formatting, and so
-// no allocation per keystroke.
-//
-// **The line is a `Buf[char]`, so the cursor is an index into it and the arithmetic is `at - 1` and
-// `at + 1`.** It was held as bytes until the standard library could turn characters back into text —
-// `encode_utf8`, which `StrBuilder.push_char` goes through — and that cost sixty lines of walking
-// UTF-8 boundaries by hand, in `left`, `right`, `backspace` and `delete_at` alike. None of it is here
-// now, and one bad byte can no longer be half-erased, because a half character never enters the line.
-//
-// The one thing still assumed is that a character occupies **one column**. A wide character — CJK,
-// most emoji — takes two, so erasing one leaves half of it behind. Getting that right means asking
-// `sysl.text.columns` for a width and counting columns rather than characters, which is a further
-// piece of work and is not done here.
-private write_from(line: *Buf[char], from: usize) =
-    var i = from
-
-    while i < line.len()
-        write_char(line.view()[i])
-        i += 1
-
-private left(line: *Buf[char], at: usize) -> usize =
-    if at == 0 then return at
-
-    write_char('\b')
-    at - 1
-
-private right(line: *Buf[char], at: usize) -> usize =
-    if at >= line.len() then return at
-
-    write_char(line.view()[at])
-    at + 1
-
-private to_start(line: *Buf[char], at: usize) -> usize =
-    var i = at
-
-    while i > 0
-        write_char('\b')
-        i -= 1
-
-    0
-
-private to_end(line: *Buf[char], at: usize) -> usize =
-    write_from(line, at)
-    line.len()
-
-// ### Changing
-//
-// After an edit at `at`, everything to its right has moved, so the tail is written out again and the
-// cursor walked back to where it belongs. `blanks` is how many columns to paint over — what the line
-// no longer covers, one for a deletion and none for an insertion.
-private redraw(line: *Buf[char], at: usize, blanks: usize) =
-    write_from(line, at)
-
-    var pad = blanks
-
-    while pad > 0
-        write_char(' ')
-        pad -= 1
-
-    var back = line.len() - at + blanks
-
-    while back > 0
-        write_char('\b')
-        back -= 1
-end redraw
-
-private insert(line: *Buf[char], at: usize, c: char) -> usize =
-    line.insert(at, c)
-    write_char(c)
-    redraw(line, at + 1, 0)
-    at + 1
-
-private backspace(line: *Buf[char], at: usize) -> usize =
-    if at == 0 then return at
-
-    line.remove(at - 1)
-    write_char('\b')
-    redraw(line, at - 1, 1)
-    at - 1
-
-private delete_at(line: *Buf[char], at: usize) -> usize =
-    if at >= line.len() then return at
-
-    line.remove(at)
-    redraw(line, at, 1)
-    at
-
-// Ctrl-U — everything gone.
-private kill_line(line: *Buf[char], at: usize) -> usize =
-    val was = line.len()
-
-    to_start(line, at)
-    line.clear()
-    redraw(line, 0, was)
-    0
-
-// Ctrl-K — everything from the cursor to the end.
-private kill_to_end(line: *Buf[char], at: usize) -> usize =
-    val dropped = line.len() - at
-
-    line.truncate(at)
-    redraw(line, at, dropped)
-    at
-
-private new_line() =
-    write_char('\r')
-    write_char('\n')
+// **Three things came back that could not be had here**, each a real defect rather than a missing
+// nicety. A character is measured in *columns*, so erasing a CJK character or an emoji no longer
+// leaves half of it on the screen. An arrow key is understood in both spellings a terminal sends —
+// this file read only `ESC [ …`, and a terminal in application cursor key mode sends `ESC O …`, which
+// arrived as stray letters in the line. And the whole of it is **tested**, against a byte script
+// rather than a person at a cable, which is what the README called this package's real weakness.
