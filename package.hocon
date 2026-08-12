@@ -27,7 +27,7 @@ package {
   version = "0.0.7"
 }
 
-// **`alloc = true`, and it was not always so.** Until 0.0.3 this package asked for nothing: every
+// **`heap = true`, and it was not always so.** Until 0.0.3 this package asked for nothing: every
 // name here is a call into C that the SDK's own link satisfies, and a call into C is not a
 // capability.
 //
@@ -42,7 +42,7 @@ package {
 //
 // **No operating system, though, and there should never be one here.**
 requires {
-  alloc = true
+  heap = true
 }
 
 //
