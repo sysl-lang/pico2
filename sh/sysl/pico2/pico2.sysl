@@ -95,8 +95,8 @@ on_usb_power() -> bool = lib.cyw43_arch_gpio_get(vbus_pin)
 // no TCP/IP stack linked the radio associates and nothing is ever able to say so. There are two:
 //
 // - **`..._lwip_threadsafe_background`** drives the driver from an interrupt, so a program that
-//   blocks somewhere else keeps its connection alive while it waits. A program built around
-//   `read_line` wants this one.
+//   blocks somewhere else keeps its connection alive while it waits. A console built on `ConsoleIn`
+//   wants this one: it spends nearly all its life blocked on a keystroke.
 // - **`..._lwip_poll`** does nothing until `poll` is called, which is cheaper and entirely wrong for
 //   a program that blocks on input.
 //
