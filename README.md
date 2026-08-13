@@ -178,11 +178,20 @@ library does not behave that way.
 ```cmake
 set(PICO_HARD_FLOAT_ABI 1)          # before the SDK is imported
 
+# The directories the SDK's headers are actually behind, read off the target CMake has already
+# resolved -- `cyw43.h` includes `lwip/netif.h`, which is two link libraries away from where this
+# package's C sits, so naming targets one at a time gets each one's headers and none of what they
+# pull in.
+set(SYSL_C_INCLUDES $<TARGET_PROPERTY:app,INCLUDE_DIRECTORIES>)
+
 add_custom_command(
     OUTPUT ${SYSL_ARCHIVE} ${SYSL_ARCHIVE}.h
     COMMAND sysl build-c ${CMAKE_CURRENT_SOURCE_DIR}/app --target thumb-freestanding
+            --include-path pico_sdk=${PICO_SDK_PATH}
+            "$<$<BOOL:${SYSL_C_INCLUDES}>:--include-path;$<JOIN:${SYSL_C_INCLUDES},;--include-path;>>"
             -o ${SYSL_ARCHIVE}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/app/app.sysl
+    COMMAND_EXPAND_LISTS
     VERBATIM)
 
 add_executable(app ${SYSL_ARCHIVE})
@@ -194,6 +203,31 @@ target_link_libraries(app pico_stdlib pico_cyw43_arch_none ${SYSL_ARCHIVE})
 must have sources" rule with no C translation unit anywhere.
 
 `sysl-lang/pico-scratch` is a worked example of exactly this — a blink program and a REPL.
+
+### The two kinds of include path do different jobs, and neither substitutes for the other
+
+**`--include-path pico_sdk=${PICO_SDK_PATH}` answers this package's declaration.** The four C files
+here include ten headers none of them carries — `pico/cyw43_arch.h`, `pico/time.h`, `cyw43.h`, four
+out of `lwip/` and two out of mbedTLS and PSA — and `package.hocon` says so:
+
+```hocon
+requires { headers { pico_sdk = "the pico-sdk's headers, and the lwIP and mbedTLS ones …" } }
+```
+
+One name rather than three, because all a consumer knows is a single `PICO_SDK_PATH`; how the SDK
+arranges lwIP and mbedTLS underneath it is not something to make them restate. Get it wrong and the
+build stops before clang runs, naming the package, the headers and the flag. Before the declaration
+existed it stopped *inside* clang instead, which named a file and knew nothing about this package:
+
+```
+fatal error: 'pico/cyw43_arch.h' file not found
+```
+
+**The bare list is what actually finds them**, and there are eighty-odd entries in it, since the SDK
+spreads its headers one directory per library. A bare `--include-path` deliberately does not answer a
+declaration — the check asks what a build says it has rather than what it might happen to find — so
+both are needed: the named one is the consumer saying *where the SDK is*, the bare list is CMake
+saying *how it is laid out*.
 
 ### Two things there are load bearing
 

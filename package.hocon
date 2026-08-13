@@ -15,16 +15,16 @@
 // against `sysl.sum`, and compiles it as more modules.
 //
 //     dependencies {
-//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.7" }
+//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.8" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.0.7` on this repository. The coordinate names the *package*, `pico2`, while the module a
+// tag `v0.0.8` on this repository. The coordinate names the *package*, `pico2`, while the module a
 // program imports is `sh.sysl.pico2`; `packages.md § 9` keeps those two deliberately apart.
 
 package {
   name    = "pico2"
-  version = "0.0.7"
+  version = "0.0.8"
 }
 
 // **`heap = true`, and it was not always so.** Until 0.0.3 this package asked for nothing: every
@@ -41,8 +41,30 @@ package {
 // the SDK's board and the SDK is what brings the heap.
 //
 // **No operating system, though, and there should never be one here.**
+//
+// **`headers` is the other kind of thing a package can need of its environment, and this is the case
+// it was written for.** A capability is answered by the target and there is nothing for anybody to go
+// and do; a header is answered by a path on a machine this package has never seen. The four C files
+// here include ten headers none of them carries -- `pico/cyw43_arch.h`, `pico/time.h`, `cyw43.h`,
+// four out of `lwip/`, and two out of mbedTLS and PSA -- and every one of them arrives in the SDK
+// tree. So it is **one** name rather than three: all a consumer knows is a single `PICO_SDK_PATH`,
+// and asking them to say the same thing under three names would be asking about how the SDK is laid
+// out rather than about where it is.
+//
+// What it buys is the refusal. Without it, a consumer who has not wired their include paths through
+// to `sysl build-c` finds out from clang, which names a header and knows nothing about sysl, this
+// package, or the flag that would fix it:
+//
+//     fatal error: 'pico/cyw43_arch.h' file not found
+//
+// A path is deliberately not written here. This file is committed and describes the *package*, and
+// where somebody keeps the SDK is not a property of the package -- `15 §8` refuses it in as many
+// words, and it is the same split `@link` draws against `--link-path`.
 requires {
   heap = true
+  headers {
+    pico_sdk = "the pico-sdk's headers, and the lwIP and mbedTLS ones that arrive in the same tree, which a CMake build knows as PICO_SDK_PATH"
+  }
 }
 
 //
