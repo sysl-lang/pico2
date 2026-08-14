@@ -703,7 +703,7 @@ end ConsoleIn
 //
 // It needs no flushing, which is the one place a board is simpler than a host: the SDK's `putchar`
 // puts bytes on the wire rather than into a buffer, so what an editor echoes appears as it is typed
-// without anybody asking. `sysl.term.tty.tty_writer` exists because a hosted C library does not.
+// without anybody asking. `sysl.posix.tty.tty_writer` exists because a hosted C library does not.
 struct ConsoleOut
 end ConsoleOut
 

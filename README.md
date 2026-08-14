@@ -166,7 +166,7 @@ missing nicety:
 What stays here is what only a board can do: `read_byte`, `write_byte`, `read_char`, `write_char`,
 and the two stream types over them. **Neither needs flushing**, which is the one place a board is
 simpler than a host — the SDK's `putchar` puts bytes on the wire rather than into a buffer, so what
-the editor echoes appears as it is typed. `sysl.term.tty.tty_writer` exists because a hosted C
+the editor echoes appears as it is typed. `sysl.posix.tty.tty_writer` exists because a hosted C
 library does not behave that way.
 
 **Needs sysl 0.0.38 or newer**, which is where `sysl.term.edit` ships.
