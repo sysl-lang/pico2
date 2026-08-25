@@ -101,6 +101,7 @@ What the outer module actually removes:
 | `putchar(c: int) -> int` | `write_byte(b: u8)`, and `write_char(c: char)` |
 | `cyw43_arch_gpio_put(wl_gpio, value)` | `led(on: bool)` |
 | `sleep_ms(u32)` **and** `sleep_us(u64)` | `sleep(d: Duration)` |
+| `time_us_64() -> uint64_t` | `monotonic() -> Duration` |
 
 A caller writing `if c < 0` is writing C; a caller matching on `None` is writing sysl.
 
@@ -119,6 +120,18 @@ constants — `led_pin`, `smps_pin`, `vbus_pin`.
 
 **Waiting.** `sleep(d: Duration)`. One function where C has two, now that `sysl.time` can name a
 length shorter than a second, and `sysl.time` writes one number-first: `sleep(120.ms)`.
+
+**Reading the clock.** `monotonic() -> Duration` — how long the board has been running, straight off
+the RP2350's timer. It is a `Duration` and not an `Instant`, which is the same distinction
+`sysl.posix.time` draws under the same name: a counter from an origin nobody specifies is not a point
+on the timeline, so one reading answers nothing and only the difference of two means anything.
+
+    val t0 = monotonic()
+    work()
+    print(s"took ${whole_millis(monotonic() - t0)}ms")
+
+The timer counts microseconds and a `Duration` is made of microseconds, so nothing is scaled on the
+way through. The header promises it never wraps — 64 bits of microseconds is 584,000 years.
 
 **Bytes and characters.** `read_byte()`/`write_byte()` and `read_char()`/`write_char()`. Both pairs
 exist because they are different things: a `char` is a Unicode scalar and may take four bytes on the
@@ -176,8 +189,6 @@ library does not behave that way.
 `CMakeLists.txt` runs the compiler and links what it writes:
 
 ```cmake
-set(PICO_HARD_FLOAT_ABI 1)          # before the SDK is imported
-
 # The directories the SDK's headers are actually behind, read off the target CMake has already
 # resolved -- `cyw43.h` includes `lwip/netif.h`, which is two link libraries away from where this
 # package's C sits, so naming targets one at a time gets each one's headers and none of what they
@@ -186,7 +197,7 @@ set(SYSL_C_INCLUDES $<TARGET_PROPERTY:app,INCLUDE_DIRECTORIES>)
 
 add_custom_command(
     OUTPUT ${SYSL_ARCHIVE} ${SYSL_ARCHIVE}.h
-    COMMAND sysl build-c ${CMAKE_CURRENT_SOURCE_DIR}/app --target thumb-freestanding
+    COMMAND sysl build-c ${CMAKE_CURRENT_SOURCE_DIR}/app --target thumb-freestanding-softfp
             --include-path pico_sdk=${PICO_SDK_PATH}
             "$<$<BOOL:${SYSL_C_INCLUDES}>:--include-path;$<JOIN:${SYSL_C_INCLUDES},;--include-path;>>"
             -o ${SYSL_ARCHIVE}
@@ -231,10 +242,15 @@ saying *how it is laid out*.
 
 ### Two things there are load bearing
 
-**`PICO_HARD_FLOAT_ABI`, set before the SDK is imported.** sysl's only Cortex-M33 target is
-`thumbv8m.main-none-eabihf`, which passes floating-point arguments in VFP registers; the SDK defaults
-to `softfp`. GNU ld refuses to merge objects that disagree *whether or not any float crosses the
-boundary*, and the error names VFP register arguments rather than anything you wrote.
+**`-softfp` on the target, and a stock SDK.** GNU ld refuses to merge objects whose float ABIs
+disagree *whether or not any float crosses the boundary*, and the error names VFP register arguments
+rather than anything you wrote. So somebody has to move, and it is sysl: `thumb-freestanding-softfp`
+matches what the SDK does by default, and no `PICO_HARD_FLOAT_ABI` is set here at all.
+
+This README said the opposite until 0.0.9, and told a consumer to set that switch before importing
+the SDK — true while `thumbv8m.main-none-eabihf` was sysl's only Cortex-M33 target, and wrong since
+sysl 0.0.35 added the softfp one. A language whose `@export` claim is that it fits into somebody
+else's build is the side that follows.
 
 **`@export`, and not merely a function named `main`.** A `build-c` has no entry point of its own, so
 an export is the only reachability root — with nothing exported the module prunes to nothing, and the
@@ -263,10 +279,10 @@ of the radio — and no amount of parameterising reaches it.
 
 **No checking of the declarations against the SDK.** An `extern` whose signature disagrees with the C
 one links perfectly and corrupts the call at run time. The signatures here were read out of
-`pico/time.h`, `pico/stdio.h`, `pico/stdio_usb.h` and `pico/cyw43_arch.h` rather than remembered, and
-that is currently the whole of the assurance. A generated translation unit taking the address of each
-function at the declared signature, compiled against the real headers, would turn a mismatch into a
-compile error; it is not built.
+`pico/time.h`, `hardware/timer.h`, `pico/stdio.h`, `pico/stdio_usb.h` and `pico/cyw43_arch.h` rather
+than remembered, and that is currently the whole of the assurance. A generated translation unit
+taking the address of each function at the declared signature, compiled against the real headers,
+would turn a mismatch into a compile error; it is not built.
 
 **No registers, and no `static inline`.** Much of the SDK's hardware API is `static inline` — 45
 functions in `hardware/gpio.h` alone — so it has no symbol to declare and would need a C shim.
@@ -276,9 +292,10 @@ Reaching the RP2350's registers directly is a different package and does not nee
 accepts a connection: a phone will associate and then wait for a DHCP lease that is not coming. The
 fetch is a client and there is no server side.
 
-**No clock, so no certificate expiry check.** A TLS chain is verified in full — a forged certificate
-is refused — but a genuine expired one is not caught, because the board does not know what day it is.
-SNTP would fix it and is not built.
+**No wall clock, so no certificate expiry check.** `monotonic()` counts from power-up and is not a
+date: a TLS chain is verified in full — a forged certificate is refused — but a genuine expired one
+is not caught, because the board still does not know what day it is. That wants an `Instant` from
+somewhere, and the two candidates are SNTP over the radio and an RTC on the board. Neither is built.
 
 ## Licence
 

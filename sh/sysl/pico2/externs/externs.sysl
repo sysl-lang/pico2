@@ -36,6 +36,16 @@ extern "sleep_ms" sleep_ms(ms: u32)
 
 extern "sleep_us" sleep_us(us: u64)
 
+// ## `hardware/timer.h`
+
+// Microseconds since power-up, read straight out of the timer. **The header promises it counts
+// upwards and never wraps** — 64 bits of microseconds is 584,000 years — which is what lets the
+// module next door hand it back as a `Duration` with no arithmetic in between.
+//
+// `time_us_32` is next to it in the header and is not here: it is `static inline`, so there is no
+// symbol to link, and its 32 bits wrap every 71 minutes.
+extern "time_us_64" time_us_64() -> u64
+
 // ## `pico/cyw43_arch.h`
 
 // **Non-zero on failure**, C-style, rather than truthy on success.

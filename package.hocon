@@ -15,16 +15,16 @@
 // against `sysl.sum`, and compiles it as more modules.
 //
 //     dependencies {
-//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.8" }
+//       pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.9" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.0.8` on this repository. The coordinate names the *package*, `pico2`, while the module a
+// tag `v0.0.9` on this repository. The coordinate names the *package*, `pico2`, while the module a
 // program imports is `sh.sysl.pico2`; `packages.md § 9` keeps those two deliberately apart.
 
 package {
   name    = "pico2"
-  version = "0.0.8"
+  version = "0.0.9"
 }
 
 // **`heap = true`, and it was not always so.** Until 0.0.3 this package asked for nothing: every

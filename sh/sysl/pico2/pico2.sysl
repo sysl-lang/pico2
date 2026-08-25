@@ -31,7 +31,7 @@ import sh.sysl.pico2.externs as lib
 import sysl.buf.{Buf, buf}
 import sysl.io.Reader
 import sysl.text.{Search, cstring, from_cstring, parse_int, str_builder}
-import sysl.time.{Duration, DurationUnits, whole_micros, whole_millis}
+import sysl.time.{Duration, DurationUnits, micros, whole_micros, whole_millis}
 
 // ## The board
 //
@@ -77,6 +77,26 @@ wait_for_terminal() =
 // It goes to `sleep_us` for either, since a `Duration` is microseconds inside and the SDK's
 // millisecond form is the same wait with a multiply in front of it.
 sleep(d: Duration) = lib.sleep_us(u64(whole_micros(d)))
+
+// ## Reading the clock
+//
+// How long the board has been running, as a length of time from power-up.
+//
+// **One reading answers nothing. Two readings subtracted answer how long something took**, which is
+// the only question a monotonic counter can be asked:
+//
+//     val t0 = monotonic()
+//     work()
+//     print(s"took ${whole_millis(monotonic() - t0)}ms")
+//
+// **A `Duration` rather than an `Instant`**, and the name is `sysl.posix.time`'s on purpose: a
+// counter from an origin nobody specifies is not a point on the timeline, so it is given a type no
+// calendar function accepts. That is the same distinction the host module draws, spelled the same
+// way, so a timing routine written against one reads against the other.
+//
+// The RP2350's timer counts microseconds, which is what a `Duration` is made of — so there is no
+// scaling here and nothing to get wrong.
+monotonic() -> Duration = micros(long(lib.time_us_64()))
 
 // ## The LED and the supply
 
