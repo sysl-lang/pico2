@@ -3,6 +3,8 @@
 The Raspberry Pi Pico 2 W for sysl — the board's own entry points, so that a program can be written
 in sysl and hosted by the C SDK.
 
+*An independent sysl package for the Raspberry Pi Pico 2. It is not affiliated with or endorsed by Raspberry Pi Ltd.*
+
 ```sysl
 import sh.sysl.pico2.*
 import sysl.time.DurationUnits
