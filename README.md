@@ -30,7 +30,7 @@ That is a whole program. There is no C in it, and no C in the project that build
 
 ```hocon
 dependencies {
-  pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.6" }
+  pico2 { git = "github.com/sysl-lang/pico2", version = "0.0.10" }
 }
 ```
 
@@ -221,7 +221,7 @@ must have sources" rule with no C translation unit anywhere.
 
 **`--include-path pico_sdk=${PICO_SDK_PATH}` answers this package's declaration.** The four C files
 here include ten headers none of them carries — `pico/cyw43_arch.h`, `pico/time.h`, `cyw43.h`, four
-out of `lwip/` and two out of mbedTLS and PSA — and `package.hocon` says so:
+out of `lwip/` and two out of mbedTLS and PSA — and `sysl.hocon` says so:
 
 ```hocon
 requires { headers { pico_sdk = "the pico-sdk's headers, and the lwIP and mbedTLS ones …" } }
