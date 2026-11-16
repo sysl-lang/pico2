@@ -613,7 +613,7 @@ struct Network
 //
 // An empty answer means the scan could not be started or nothing replied — the two are not
 // distinguished, because a caller can do the same thing about either.
-scan(patience: Duration) -> []Network =
+scan(patience: Duration) -> []const Network =
     var out: Buf[Network] = buf()
 
     // **The station interface has to be up to scan**, and this is the second path that needs it. It
